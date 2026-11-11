@@ -1,0 +1,81 @@
+# NOTICE
+
+FlowDesktop is licensed under the MIT License (see [LICENSE](LICENSE)).
+
+This file lists the third-party components that FlowDesktop depends on, and the
+attribution or notice obligations that come with them.
+
+## Python dependencies
+
+| Component | License | Note |
+|---|---|---|
+| [psycopg2](https://pypi.org/project/psycopg2-binary/) | LGPL-3.0-or-later with the PostgreSQL License exception | Used unmodified. The exception permits use in a larger work under your own terms. |
+| [pywebpush](https://pypi.org/project/pywebpush/) | MPL-2.0 | Used unmodified. MPL §3.2 requires that modifications to MPL-covered files be published under the MPL — there are none. |
+| [fastembed](https://pypi.org/project/fastembed/) | Apache-2.0 | Used unmodified. |
+| [sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2) | Apache-2.0 | The default local embedding model. If you redistribute an image that bakes this model in, retain the upstream licence and NOTICE. |
+| [litellm](https://pypi.org/project/litellm/) | MIT | The OSS package only. |
+| [sqlalchemy](https://pypi.org/project/SQLAlchemy/) | MIT | |
+| [alembic](https://pypi.org/project/alembic/) | MIT | |
+| [asyncpg](https://pypi.org/project/asyncpg/) | Apache-2.0 | |
+| [fastapi](https://pypi.org/project/fastapi/) | MIT | |
+| [pydantic](https://pypi.org/project/pydantic/) | MIT | |
+| [httpx](https://pypi.org/project/httpx/) | BSD-3-Clause | |
+| [aiohttp](https://pypi.org/project/aiohttp/) | Apache-2.0 | |
+| [yfinance](https://pypi.org/project/yfinance/) | Apache-2.0 | |
+| [akshare](https://pypi.org/project/akshare/) | Apache-2.0 | |
+| [pandas](https://pypi.org/project/pandas/) | BSD-3-Clause | |
+| [numpy](https://pypi.org/project/numpy/) | BSD-3-Clause | |
+| [apscheduler](https://pypi.org/project/APScheduler/) | MIT | |
+| [python-jose](https://pypi.org/project/python-jose/) | MIT | |
+| [stripe](https://pypi.org/project/stripe-python/) | MIT | |
+| [pgvector](https://pypi.org/project/pgvector/) | PostgreSQL License | The Python binding. The server extension is under the PostgreSQL licence. |
+
+The full, authoritative dependency set with exact versions is in
+`backend/uv.lock` and `frontend/yarn.lock`.
+
+## Frontend dependencies
+
+| Component | License | Note |
+|---|---|---|
+| [react](https://www.npmjs.com/package/react) / [react-dom](https://www.npmjs.com/package/react-dom) | MIT | |
+| [react-icons](https://www.npmjs.com/package/react-icons) | MIT (package) | The package bundles icon sets that carry their **own** licences — Font Awesome icons are **CC BY 4.0**, which requires attribution; Feather is MIT, Material is Apache-2.0. If you use icons from this package in a distributed build, credit the icon authors as the CC BY 4.0 terms require. |
+| [recharts](https://www.npmjs.com/package/recharts) | MIT | |
+| [keycloak-js](https://www.npmjs.com/package/keycloak-js) | Apache-2.0 | |
+| [react-router-dom](https://www.npmjs.com/package/react-router-dom) | MIT | |
+| [react-markdown](https://www.npmjs.com/package/react-markdown) / [remark-gfm](https://www.npmjs.com/package/remark-gfm) | MIT | |
+| [@tanstack/react-query](https://www.npmjs.com/package/@tanstack/react-query) | MIT | |
+| [i18next](https://www.npmjs.com/package/i18next) / [react-i18next](https://www.npmjs.com/package/react-i18next) | MIT | |
+| [axios](https://www.npmjs.com/package/axios) | MIT | |
+| [date-fns](https://www.npmjs.com/package/date-fns) | MIT | |
+| [clsx](https://www.npmjs.com/package/clsx) | MIT | |
+| [tailwindcss](https://www.npmjs.com/package/tailwindcss) | MIT | |
+| [vite](https://www.npmjs.com/package/vite) / [typescript](https://www.npmjs.com/package/typescript) | MIT | |
+
+## Fonts
+
+The interface uses the **IBM Plex** family (Sans, Mono, Serif), licensed under
+the **SIL Open Font License 1.1**. The fonts are loaded from a font CDN at
+runtime and are not redistributed with this repository. If you self-host the
+fonts instead, the OFL applies: keep the OFL text with the font files and do not
+sell the font on its own. The OFL reserves the "IBM Plex" name.
+
+## Data sources
+
+FlowDesktop retrieves data from third-party services. Those services have their
+own terms, and **FlowDesktop does not grant you any rights to them**:
+
+- **Yahoo Finance** — accessed through the `yfinance` library, which reads the
+  public endpoints. It is an unofficial interface; use it at your own risk and
+  respect Yahoo's terms.
+- **SEC EDGAR** — public US government data. The SEC asks automated clients to
+  send a contact address in the `User-Agent` header; set `SEC_USER_AGENT` to
+  something like `Your Name you@example.com`.
+- **AKShare** — aggregates public data from a range of Chinese market sources.
+
+If you redistribute a database built by the collector, you are responsible for
+complying with the terms of whichever source the data came from.
+
+## No warranty
+
+FlowDesktop is provided "AS IS", without warranty of any kind. See the MIT
+licence text in [LICENSE](LICENSE) for the full disclaimer.
