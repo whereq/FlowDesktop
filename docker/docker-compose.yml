@@ -1,0 +1,96 @@
+# =============================================================================
+# FlowDesktop — full stack for local use and small self-hosted deployments.
+#
+#   cp docker/.env.example docker/.env    # then edit it
+#   docker compose -f docker/docker-compose.yml up -d --build
+#
+# This file is a starting point, not a production topology. Put a TLS-
+# terminating reverse proxy in front of the `frontend` service, or serve the
+# API directly, depending on how you expose it.
+# =============================================================================
+name: flowdesktop
+
+services:
+  # ── Database ─────────────────────────────────────────────────────────────
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flowdesktop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flowdesktop}
+      POSTGRES_DB: ${POSTGRES_DB:-flowdesktop}
+      # The schema needs pgvector (embeddings) and pg_trgm (symbol search).
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init-extensions.sql:/docker-entrypoint-initdb.d/10-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flowdesktop} -d ${POSTGRES_DB:-flowdesktop}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ports:
+      # Exposed for local inspection only. Drop this line in a real deployment.
+      - "${DB_PORT:-5432}:5432"
+
+  # ── API ──────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowdesktop}:${POSTGRES_PASSWORD:-flowdesktop}@db:5432/${POSTGRES_DB:-flowdesktop}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-flowdesktop}:${POSTGRES_PASSWORD:-flowdesktop}@db:5432/${POSTGRES_DB:-flowdesktop}
+    # Apply the schema before serving. Safe to re-run: the migration is a
+    # single idempotent revision.
+    command: >
+      sh -c "python -m alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Collector ────────────────────────────────────────────────────────────
+  # Fills the database: quotes, history, SEC filings, insider activity and
+  # short interest. Uses only keyless public sources by default.
+  collector:
+    build:
+      context: ..
+      dockerfile: docker/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flowdesktop}:${POSTGRES_PASSWORD:-flowdesktop}@db:5432/${POSTGRES_DB:-flowdesktop}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-flowdesktop}:${POSTGRES_PASSWORD:-flowdesktop}@db:5432/${POSTGRES_DB:-flowdesktop}
+    command: ["python", "-m", "flowdesk_collector.scheduler"]
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/frontend/Dockerfile
+      args:
+        VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-https://auth.example.com}
+        VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-flowdesktop}
+        VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-flowdesktop-spa}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+
+volumes:
+  postgres_data:

@@ -1,0 +1,46 @@
+# Git / VCS
+.git
+.gitignore
+.github
+
+# Local secrets — never bake these into an image
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/venv
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/htmlcov
+**/.coverage
+**/*.egg-info
+**/build
+**/dist
+
+# Node
+**/node_modules
+frontend/dist
+frontend/tsconfig.tsbuildinfo
+frontend/tsconfig.node.tsbuildinfo
+
+# Editors / OS
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+
+# Docs and local data
+docs
+scripts
+*.md
+!backend/README.md
+!backend/packages/*/README.md
+pgdata

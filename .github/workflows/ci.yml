@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend — tests, evals, lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The two local packages are path dependencies inside this repository —
+      # there is no private index and nothing to fetch over SSH.
+      - name: Install dependencies
+        run: |
+          uv venv
+          uv sync --frozen --extra dev
+
+      - name: Unit tests
+        run: uv run python -m pytest -q --no-cov
+
+      # The router evals are pure/deterministic — no database, no LLM.
+      - name: Router evals
+        run: uv run python evals/run_evals.py
+
+      - name: Lint
+        run: |
+          uv run ruff check api worker flowdesk evals tests packages
+          uv run ruff format --check api worker flowdesk evals tests packages
+
+  frontend:
+    name: Frontend — lint and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Build
+        run: yarn build
