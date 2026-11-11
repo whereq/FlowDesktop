@@ -1,0 +1,51 @@
+[project]
+name = "flowdesk-core"
+version = "0.1.0"
+description = "Shared data core for FlowDesktop — SQLAlchemy models, database engine, settings, auth and LLM gateway."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "FlowDesktop contributors" }]
+
+dependencies = [
+    # ORM + schema. The [asyncio] extra pulls greenlet, which SQLAlchemy 2.x made
+    # an optional dependency — without it every async DB session raises ImportError.
+    "sqlalchemy[asyncio]>=2.0.48",
+    "greenlet>=3.0.3",
+    "asyncpg>=0.31.0",
+    # SQLAlchemy 2.1 changed the default sync postgresql driver to psycopg3, so a
+    # driver-less `postgresql://` URL (used by alembic) resolves to psycopg3.
+    # Ship it so `alembic upgrade` works; psycopg2-binary stays for explicit
+    # `+psycopg2` URLs.
+    "psycopg[binary]>=3.1.0",
+    "psycopg2-binary>=2.9.11",
+    "alembic>=1.18.4",
+    "pgvector>=0.3.6",          # RetrievalChunk embeddings (NOVA semantic search)
+    # auth.py's get_current_user uses FastAPI primitives.
+    "fastapi>=0.135.2",
+    # Settings
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
+    "python-dotenv>=1.2.2",
+    # Shared helpers
+    "httpx>=0.28.1",
+    "aiohttp>=3.13.4",
+    "litellm>=1.0.0",            # LLM gateway
+    "python-jose[cryptography]>=3.5.0",  # auth (JWT verification)
+    "pywebpush>=2.0.3",          # webpush / notifications
+]
+
+[project.optional-dependencies]
+# Local ONNX embedding model (NOVA semantic search). Optional so a minimal
+# deployment does not pull ONNX.
+embeddings = ["fastembed>=0.3.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Auto-discover the package AND its subpackages (flowdesk_core.models, …).
+# An explicit packages=["flowdesk_core"] would silently omit models/ from the
+# wheel.
+[tool.setuptools.packages.find]
+include = ["flowdesk_core*"]

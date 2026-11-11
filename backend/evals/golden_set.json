@@ -1,0 +1,21 @@
+{
+  "router": [
+    { "q": "compare AAPL vs MSFT", "expect": "stock_comparator" },
+    { "q": "KO or PEP, which is the better buy?", "expect": "stock_comparator" },
+    { "q": "how is my portfolio doing?", "expect": "portfolio_doctor" },
+    { "q": "what are the risks in my holdings", "expect": "portfolio_doctor" },
+    { "q": "build me a swing trade strategy for TSLA", "expect": "strategy_architect" },
+    { "q": "how would I hedge my tech exposure", "expect": "strategy_architect" },
+    { "q": "analyze NVDA in depth", "expect": "research_analyst" },
+    { "q": "should I buy AAPL?", "expect": "research_analyst" },
+    { "q": "what's the weather today", "expect": null }
+  ],
+  "skill": [
+    {
+      "skill": "research_analyst",
+      "input": "In one short sentence, what is AAPL's latest price?",
+      "symbols": ["AAPL"],
+      "must_match": "\\d"
+    }
+  ]
+}
