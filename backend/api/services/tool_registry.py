@@ -91,7 +91,9 @@ def _short_interest_payload(latest) -> dict:
         "shares_short": shares_short,
         "shares_short_prior_month": int(prior) if prior is not None else None,
         "shares_short_change_pct": change_pct,
-        "source": "Yahoo Finance (reported with a lag)",
+        # The source label the Data API reports for the row (it attributes
+        # the underlying feed itself), plus the fact that it lands on a lag.
+        "source": f"{latest.source} (reported with a lag)" if latest.source else None,
     }
 
 
@@ -124,7 +126,7 @@ class ToolRegistry:
                         "properties": {
                             "symbol": {
                                 "type": "string",
-                                "description": "Stock symbol in Yahoo Finance format (e.g. AAPL, 600519.SS, 9988.HK)",
+                                "description": "Stock symbol in the Data API's canonical format (e.g. AAPL, 600519.SS, 9988.HK)",
                             },
                         },
                         "required": ["symbol"],
@@ -222,8 +224,8 @@ class ToolRegistry:
                 "function": {
                     "name": "fetch_live_quote",
                     "description": (
-                        "Fetch real-time quote directly from Yahoo Finance for any stock symbol, "
-                        "including stocks not yet in the FlowDesktop database. "
+                        "Fetch the latest quote directly from the whereq.cloud Data API for any "
+                        "stock symbol, including instruments not yet in the FlowDesktop database. "
                         "Use this when get_stock_quote returns no data or when the user asks about "
                         "a symbol that may not be tracked yet."
                     ),
@@ -232,7 +234,7 @@ class ToolRegistry:
                         "properties": {
                             "symbol": {
                                 "type": "string",
-                                "description": "Stock symbol in Yahoo Finance format (e.g. AAPL, 600519.SS, 9988.HK, 7203.T)",
+                                "description": "Stock symbol (e.g. AAPL, 600519.SS, 9988.HK, 7203.T)",
                             },
                         },
                         "required": ["symbol"],
@@ -253,7 +255,7 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "symbol": {"type": "string", "description": "Yahoo Finance symbol"},
+                            "symbol": {"type": "string", "description": "Stock symbol"},
                         },
                         "required": ["symbol"],
                     },
@@ -272,7 +274,7 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "symbol": {"type": "string", "description": "Yahoo Finance symbol"},
+                            "symbol": {"type": "string", "description": "Stock symbol"},
                         },
                         "required": ["symbol"],
                     },
@@ -522,7 +524,7 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "symbol": {"type": "string", "description": "Yahoo Finance symbol"},
+                            "symbol": {"type": "string", "description": "Stock symbol"},
                         },
                         "required": ["symbol"],
                     },
@@ -693,7 +695,7 @@ class ToolRegistry:
                             "symbols": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "2-5 Yahoo Finance symbols",
+                                "description": "2-5 stock symbols",
                             },
                         },
                         "required": ["symbols"],
@@ -772,7 +774,7 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "symbol": {"type": "string", "description": "Yahoo Finance symbol"},
+                            "symbol": {"type": "string", "description": "Stock symbol"},
                             "alert_type": {
                                 "type": "string",
                                 "enum": [
@@ -802,7 +804,7 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "symbol": {"type": "string", "description": "Yahoo Finance symbol"},
+                            "symbol": {"type": "string", "description": "Stock symbol"},
                         },
                         "required": ["symbol"],
                     },
@@ -819,7 +821,7 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "symbol": {"type": "string", "description": "Yahoo Finance symbol"},
+                            "symbol": {"type": "string", "description": "Stock symbol"},
                             "action": {"type": "string", "enum": ["buy", "sell"]},
                             "shares": {"type": "number", "description": "Number of shares"},
                             "price": {"type": "number", "description": "Execution price per share"},
@@ -872,7 +874,7 @@ class ToolRegistry:
                             },
                             "symbol": {
                                 "type": "string",
-                                "description": "Yahoo Finance symbol (e.g. AAPL, 600519.SS)",
+                                "description": "Stock symbol (e.g. AAPL, 600519.SS)",
                             },
                             "side": {"type": "string", "enum": ["buy", "sell"]},
                             "order_type": {
@@ -1281,43 +1283,45 @@ class ToolRegistry:
         }
 
     async def _fetch_live_quote(self, symbol: str) -> dict:
-        """Fetch real-time quote from Yahoo Finance for any symbol."""
+        """Fetch the latest quote straight from the whereq.cloud Data API.
+
+        This is the on-demand path for a symbol that is not in the local
+        database yet — the scheduled collector only covers the universe it has
+        synced. The API is the same source the collector uses, so the two
+        never disagree.
+        """
+        from flowdesk_core.whereq_cloud import WhereqCloudClient
+
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return {"error": "fetch_live_quote requires a 'symbol'."}
+
         try:
-            import asyncio
-
-            import yfinance as yf
-
-            def _fetch():
-                ticker = yf.Ticker(symbol)
-                info = ticker.fast_info
-                hist = ticker.history(period="2d")
-                if hist.empty:
-                    return None
-                latest = hist.iloc[-1]
-                prev = hist.iloc[-2] if len(hist) > 1 else None
-                price = float(latest["Close"])
-                change_pct = None
-                if prev is not None:
-                    prev_close = float(prev["Close"])
-                    if prev_close:
-                        change_pct = (price - prev_close) / prev_close * 100
-                return {
-                    "symbol": symbol,
-                    "name": getattr(info, "exchange", symbol),
-                    "price": round(price, 4),
-                    "change": f"{change_pct:+.2f}%" if change_pct is not None else "N/A",
-                    "volume": int(latest["Volume"]) if latest["Volume"] else None,
-                    "currency": getattr(info, "currency", "USD"),
-                    "source": "Yahoo Finance (live)",
-                }
-
-            result = await asyncio.get_event_loop().run_in_executor(None, _fetch)
-            if result is None:
-                return {"error": f"No data found for symbol {symbol}. Check the symbol format."}
-            return result
+            async with WhereqCloudClient() as client:
+                q = await client.quote(sym)
         except Exception as exc:
-            logger.warning("fetch_live_quote failed for %s: %s", symbol, exc)
-            return {"error": f"Failed to fetch live data for {symbol}: {exc}"}
+            return {"error": f"Could not fetch a quote for {sym}: {exc}"}
+
+        if not q:
+            return {
+                "error": (
+                    f"No quote available for {sym}. It may not be a covered "
+                    f"instrument, or the API has not collected one yet."
+                )
+            }
+
+        change_percent = q.get("change_percent")
+        return {
+            "symbol": q.get("symbol") or sym,
+            "name": q.get("name") or sym,
+            "price": q.get("price"),
+            "change": f"{float(change_percent):+.2f}%" if change_percent is not None else "N/A",
+            "volume": q.get("volume"),
+            "currency": q.get("currency") or "USD",
+            "exchange": q.get("exchange"),
+            "timestamp": q.get("timestamp"),
+            "source": "whereq.cloud Data API",
+        }
 
     async def _save_memory(
         self, db: AsyncSession, user_id: str | None, key: str, value: str
@@ -1833,15 +1837,14 @@ class ToolRegistry:
     async def _get_short_interest(self, db: AsyncSession, symbol: str) -> dict:
         """Latest short-interest snapshot for a symbol + month-over-month change.
 
-        Note: the ShortInterest ORM columns were renamed to match the live
-        FINRA-shaped table (migration 155/212) — `settlement_date`,
-        `short_interest`, `prior_short_interest`, `days_to_cover`,
-        `short_pct_of_float`. The provider dict from
-        `collector.providers.short_interest` still uses the Yahoo-shaped keys
-        (`as_of_date`, `shares_short`, ...), so the write side maps between the
-        two (api/services/lazy_market_data._short_interest_row) and the read
-        side maps ORM → API here (_short_interest_payload). The response shape
-        is unchanged — the frontend's ShortInterestData contract depends on it.
+        The ShortInterest ORM columns use the FINRA-shaped names the live table
+        has (`settlement_date`, `short_interest`, `prior_short_interest`,
+        `days_to_cover`, `short_pct_of_float`). The Data API uses the same
+        names, so the write side is a straight coercion
+        (`flowdesk_collector.collectors.mapping.short_interest_values`) and the
+        read side maps ORM → API here (_short_interest_payload). The response
+        shape is unchanged — the frontend's ShortInterestData contract depends
+        on it.
         """
         from flowdesk_core.models.short_interest import ShortInterest
 

@@ -190,7 +190,7 @@ async def get_daily_status(
 async def get_provider_status(
     db: AsyncSession = Depends(get_db),
 ):
-    """Get current rate-limit status for all providers."""
+    """Get current rate-limit status for each data source."""
     result = await db.execute(select(ProviderStatus).order_by(ProviderStatus.priority))
     statuses = result.scalars().all()
 

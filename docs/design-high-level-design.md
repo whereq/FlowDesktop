@@ -20,10 +20,10 @@ and each carries a cost.
 against PostgreSQL. The model never invents a price, a date, or a filing. The
 cost is that every new data source needs a tool written for it.
 
-**2. Self-hostable without procurement.** The bundled data providers need no
-API keys, and the LLM can run entirely in BYOK mode where each user supplies
-their own key. The cost is reliance on unofficial endpoints with no service
-guarantee.
+**2. Self-hostable, but it needs one credential.** All market data comes from
+the whereq.cloud Data API, so a deployment needs an API key; the LLM can run
+entirely in BYOK mode where each user supplies their own. The cost is a single
+metered dependency instead of a chain of unofficial endpoints.
 
 **3. The database is the contract.** One schema, one Alembic revision tree, one
 set of ORM models shared by every process. The API, the collector, and NOVA's
@@ -34,9 +34,9 @@ user's behalf — write tools return proposals that the UI confirms. Identity co
 only from a verified JWT. Money is `Decimal` end to end. These are enforced by
 code paths, not by prompt text alone.
 
-**5. Configuration over code.** Providers, skills, tools, notification
-preferences, market rules, and Pulse thresholds are all data. Adding a provider,
-a skill, or a market is a configuration change, not a fork.
+**5. Configuration over code.** Skills, tools, notification preferences, market
+rules, and Pulse thresholds are all data. Adding a skill or a market is a
+configuration change, not a fork.
 
 ---
 
@@ -77,11 +77,12 @@ graph TD
         EMB["Embeddings"]
         WP["Web Push"]
         SCHEMA["schema_check"]
+        WQC["whereq_cloud<br/>Data API client"]
     end
 
     subgraph Collect["Collection tier — flowdesk_collector"]
         SCHED["Scheduler<br/>job catalogue"]
-        PROV["Providers<br/>yahoo · stooq · akshare · sec · fmp"]
+        PROV["Data API access"]
         COL["Collectors<br/>universe · quotes · history · altdata"]
         MH["Market hours"]
         PULSE["Pulse scoring"]
@@ -111,6 +112,7 @@ graph TD
     AUTH --> AUTH2
     R --> DB
     SCHED --> COL --> PROV
+    PROV --> WQC
     SCHED --> PJ
     SCHED --> MH
     PULSE --> MODELS
@@ -127,8 +129,8 @@ graph TD
 | API → Database | SQLAlchemy ORM; owner-scoped `WHERE keycloak_id = :uid` | Cross-user reads return nothing rather than another user's rows. |
 | LLM → Database | The tool catalogue — 34 named functions with declared parameters | The model cannot issue arbitrary SQL; the surface is bounded and auditable. |
 | LLM → writes | Proposal-only tools | The model prepares an action; the user confirms; the frontend performs the REST call. |
-| Collector → providers | `BaseProvider` abstract interface and normalised dataclasses | A new provider cannot leak vendor-specific shapes into the write path. |
-| Provider → database | Unique constraints per target table | A repeated collection run is a no-op, not a duplicate. |
+| Collector → Data API | `flowdesk_core.whereq_cloud.WhereqCloudClient` — one client, one payload shape, one key | A vendor-specific response shape cannot leak into the write path. |
+| Source → database | Unique constraints per target table | A repeated collection run is a no-op, not a duplicate. |
 | Process → process | PostgreSQL only. The API and collector share no in-process state. | Either process can be restarted or scaled independently. |
 
 ### 2.3 The `flowdesk_core` boundary
@@ -142,14 +144,18 @@ tier import. It holds:
 - **The ORM models** — all 51 tables. This is why a collector job and an API
   route can never disagree about a column.
 - **Auth** — JWKS caching and JWT verification.
+- **The whereq.cloud Data API client** — `whereq_cloud.WhereqCloudClient`, the one
+  place that attaches the API key and maps errors, so the API and the collector
+  cannot disagree about how the key is sent.
 - **`llm_platform`** — provider resolution and the non-streaming internal LLM
   call, deliberately free of API-layer or collector-layer imports so both
   containers can use it without side effects.
 - **Embeddings, Web Push, notifications, schema check.**
 
-`flowdesk_collector` depends on `flowdesk_core` and adds the market-data access
-layer: providers, market hours, the scheduler, the collectors, Pulse, and the
-product jobs.
+`flowdesk_collector` depends on `flowdesk_core` and adds the collection layer:
+the scheduler, the collectors, market hours, Pulse, and the product jobs. It
+has no market-data access layer of its own — every fetch goes through the
+core client.
 
 `api` depends on both and adds the application layer: routes, services, schemas.
 
@@ -182,10 +188,10 @@ it.
 
 ### 3.2 Collector — `flowdesk-collector`
 
-**Owns:** the scheduled job catalogue, the provider access layer, market-hours
-gating, the universe seed, and (in all-in-one mode) the product jobs.
+**Owns:** the scheduled job catalogue, the market-hours gating, the universe
+sync, and (in all-in-one mode) the product jobs.
 
-**Does not own:** serving, authentication, schema.
+**Does not own:** serving, authentication, schema, the Data API client.
 
 **Characteristics:** I/O-bound and externally rate-limited. It is bursty — quote
 collection runs every few minutes but stops entirely when every market is
@@ -194,7 +200,7 @@ already current.
 
 The scheduler runs in **UTC**. Each job body is wrapped so a failure is logged
 with a traceback rather than killing the scheduler, and blocking sockets are
-bounded by `COLLECTOR_SOCKET_TIMEOUT` so a wedged provider call cannot hang a
+bounded by `COLLECTOR_SOCKET_TIMEOUT` so a wedged API call cannot hang a
 worker thread indefinitely.
 
 ### 3.3 Frontend — `flowdesk-frontend`
@@ -213,11 +219,11 @@ a long analysis is not cut off mid-stream).
 
 ### 3.4 Why not one process
 
-A single process would couple three unrelated failure domains: a provider
+A single process would couple three unrelated failure domains: a Data API
 rate-limit, an LLM outage, and a traffic spike are all different problems with
 different remedies. Splitting them means:
 
-- A provider outage leaves the API serving cached data normally.
+- A Data API outage leaves the API serving cached data normally.
 - The collector can be scaled up during a backfill without touching the API.
 - The collector can be run on a different machine from the API — a real
   consideration for a self-hoster whose home connection has asymmetric
@@ -252,21 +258,34 @@ denormalised text column (`insider_transactions`, `short_interest`,
 `company_filings`, `congress_trades`).
 
 The denormalisation is deliberate for the alternative-data tables. Those tables
-come from providers that speak bare tickers, and joining them back through
-`stocks` on every read would cost a lookup for no benefit — the symbol *is* the
-key the provider gave us. `stocks` is also the soft-delete boundary:
-`is_active=False` means the symbol is no longer collected, and its rows stay.
+are keyed by bare tickers, and joining them back through `stocks` on every read
+would cost a lookup for no benefit — the symbol *is* the key the Data API
+addresses. `stocks` is also the soft-delete boundary: `is_active=False` means
+the symbol is no longer collected, and its rows stay.
 
 `quotes` is an append-only log — one row per symbol per collection run — so a
 symbol that stops trading still has a visible price history. `historical_prices`
 is the daily OHLCV series, one row per symbol per trading day.
 
+The `stocks` table is a projection of the whereq.cloud catalog. The `sync_universe`
+job walks the catalog exchange by exchange — the exchange list is what carries
+each exchange's market and currency — and upserts every instrument. An
+instrument the catalog no longer lists is soft-deleted, never removed.
+
 ### 4.2 Alternative data
 
 The corporate-information tables. `company_filings` holds the SEC's 10-K and
 10-Q primary documents verbatim in `content`; `insider_transactions` holds one
-row per Form 4 transaction line; `short_interest` holds one snapshot per
+row per Form 4 transaction; `short_interest` holds one snapshot per
 settlement date; `congress_trades` holds STOCK Act disclosures.
+
+Two of these are **not populated out of the box**. The Data API exposes SEC
+filing *metadata* by CIK — not the 10-K/10-Q narrative the grounding index
+embeds, and not a ticker→CIK mapping — so `company_filings` stays empty unless
+an operator populates it. The API does not expose congressional disclosures at
+all, so `congress_trades` stays empty for the same reason. The tables, the
+tools, and the UI panels all remain; `FILINGS_ENABLED` defaults to `False`.
+See [architecture.md §3.3](architecture.md#33-the-two-documented-data-gaps).
 
 `fundamental_data` stores XBRL concepts keyed by
 `(symbol, concept, period_end, form)` — one row per fact per filing, which
@@ -276,8 +295,7 @@ earnings and dividend calendar, discriminated by a `kind` column so the calendar
 feed is a single query.
 
 `chinese_stock_names` is a standalone name registry: the Chinese-language
-display name for a symbol, kept separate from `stocks.name_cn` because it is
-populated by a bulk provider sync rather than by the universe seeder.
+display name for a symbol, kept separate from `stocks.name_cn`.
 
 ### 4.3 Market intelligence
 
@@ -345,11 +363,11 @@ the fills are never rewritten.
 
 ### 4.7 Platform
 
-`provider_status` tracks live quota counters and availability per provider;
-`provider_registry` is the descriptive catalogue of what each provider supports.
-`crawl_coverage` records which symbols were successfully collected on which
-date, which is what gap detection reads. `crawler_run_log` records
-per-provider, per-run timing and throughput statistics.
+`provider_status` tracks the availability of the one data source and whether its
+API key is configured; `provider_registry` is the descriptive catalogue of what
+that source supports. `crawl_coverage` records which symbols were successfully
+collected on which date, which is what gap detection reads. `crawler_run_log`
+records per-run timing and throughput statistics.
 
 `data_source` catalogues the external data sources with their API base, whether
 they need a key, and their rate limits. `domains`, `entities`,
@@ -647,7 +665,7 @@ graph LR
     FE -->|"/api proxy + SSE"| API["api<br/>uvicorn"]
     API --> DB[("PostgreSQL 17")]
     COL["collector<br/>APScheduler"] --> DB
-    COL --> EXT["External data sources"]
+    COL -->|"HTTPS + X-API-Key"| EXT["whereq.cloud Data API<br/>https://api.whereq.cloud"]
 ```
 
 Four processes on one host, or four containers on one Docker host. The
@@ -671,36 +689,47 @@ link — or when the deployment already runs a shared database service.
 | Concern | Requirement |
 |---|---|
 | Database | PostgreSQL 17 with `vector` and `pg_trgm`. The API and collector both connect. |
-| Identity | An OIDC provider issuing RS256 JWTs with a realm-roles claim. |
+| Market data | A whereq.cloud API key. Every market-data request is made with it; there is no anonymous path. |
+| Identity | An OIDC provider issuing RS256 JWTs with a realm-roles claim. The shipped values are placeholders and must be replaced. |
 | LLM | Either a platform provider key, or BYOK users supplying their own. |
 | TLS | A TLS-terminating reverse proxy in front of the frontend. The application does not terminate TLS. |
-| Outbound network | HTTPS to the data providers and the LLM provider. |
+| Outbound network | HTTPS to the whereq.cloud Data API and the LLM provider. |
 | Clock | UTC. The scheduler and the market-hours table are both UTC-based. |
 
 ---
 
 ## 7. Extension points
 
-### 7.1 Adding a data provider
+### 7.1 Adding a data source
 
-**Where:** `backend/packages/flowdesk-collector/flowdesk_collector/providers/`.
+**Where:** `backend/packages/flowdesk-core/flowdesk_core/whereq_cloud.py` for
+the client, `backend/packages/flowdesk-collector/flowdesk_collector/collectors/`
+for the write path.
 
-1. Subclass `BaseProvider` and implement `get_quote`, `get_quotes_batch`,
-   `get_historical`, `get_stock_info`, `search_stocks`. Return the normalised
-   dataclasses (`QuoteData`, `HistoricalData`, `StockInfo`).
-2. Declare `name`, `priority`, `daily_limit`, `minute_limit`,
-   `supports_batch`, `supported_exchanges`, `supports_realtime`,
-   `supports_historical`.
-3. Set the `adjustment` constant that matches the provider's actual convention
-   — `split_adjusted`, `split_dividend_adjusted`, `unadjusted`, or `unknown`.
-4. Export it from `providers/__init__.py`.
-5. Add it to `BUNDLED_PROVIDERS` in `provider_registry.py` so it appears in
-   `provider_status` and in `GET /api/v1/providers/status`.
+There is one data source today, and the extension points are shaped around
+that:
 
-If the provider supplies new *kinds* of data rather than prices, implement
-`EnrichmentProvider` instead, or add a new collector function alongside
-`collectors/quotes.py`, `history.py`, and `altdata.py`, and register a job for
-it in `scheduler.py`.
+1. **A new endpoint on the Data API.** Add a method to
+   `WhereqCloudClient` — it holds the base URL, the key, the timeout and the
+   retry policy, so a new method only has to describe the request and the
+   response shape.
+2. **A new payload shape.** Add a mapping function to
+   `collectors/mapping.py`. The mappings are pure functions with no database
+   and no network, so each one is unit-testable on its own and the collector
+   stays a thin write path.
+3. **A new collector.** Add a function next to `collectors/quotes.py`,
+   `history.py`, and `altdata.py` that fetches through the client, maps the
+   payload, and upserts on the target table's unique constraint.
+4. **A new job.** Register it in `scheduler.py` and set its cadence. Every
+   job body is wrapped so a failure is logged rather than fatal.
+5. **A new surface.** Add a tool to the registry (see 7.3) if NOVA should be
+   able to ask for it.
+
+A second data source — a different vendor's API, or a file you drop on disk —
+means a second client module beside `whereq_cloud.py` and the same four steps
+from there. The optional-key-provider list that used to exist (per-vendor API
+keys for price and fundamentals vendors) is gone: there is one key, and it is
+the whereq.cloud one.
 
 ### 7.2 Adding a skill
 
@@ -781,7 +810,7 @@ to `_HOURS` in `flowdesk_collector/market_hours.py` and its alias mapping to
 
 | Decision | Benefit | Cost |
 |---|---|---|
-| Keyless providers by default | Self-hostable with no procurement | Unofficial endpoints, no SLA |
+| One keyed data source | A single credential and a single payload shape | A metered dependency, and two documented data gaps |
 | Three separable processes | Failure isolation, independent scaling | More operational surface |
 | Database-mediated tool contract | Bounded, auditable, token-efficient | A tool per data source |
 | Declarative skills | One code path for native and custom agents | Misconfiguration fails at runtime |

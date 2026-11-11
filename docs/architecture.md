@@ -1,10 +1,14 @@
 # FlowDesktop — Architecture
 
-FlowDesktop is a self-hostable AI stock-analysis application. It aggregates market
-and corporate data from keyless public sources, stores it in PostgreSQL, and serves
-it through a FastAPI backend whose central feature is **NOVA** — a data-grounded
-AI analyst that answers questions by calling tools against the database rather
-than recalling from model weights.
+FlowDesktop is a self-hostable AI stock-analysis application. It aggregates
+market and corporate data from the **whereq.cloud Data API**, stores it in
+PostgreSQL, and serves it through a FastAPI backend whose central feature is
+**NOVA** — a data-grounded AI analyst that answers questions by calling tools
+against the database rather than recalling from model weights.
+
+Every data request is made with the operator's whereq.cloud API key, sent in
+the `X-API-Key` header. There is no anonymous path and no bundled scraper: the
+key is what turns the data on.
 
 This document describes the running shape of the system: the processes, the data
 stores, the external sources, the two principal request flows, the trust
@@ -32,18 +36,12 @@ graph TD
     end
 
     subgraph Collect["Collection tier"]
-        Collector["flowdesk-collector<br/>APScheduler<br/>quotes · history · filings"]
+        Collector["flowdesk-collector<br/>APScheduler<br/>universe · quotes · history · alt data"]
     end
 
     DB[("PostgreSQL 17<br/>51 tables<br/>pgvector + pg_trgm")]
 
-    subgraph External["External data sources"]
-        Yahoo["Yahoo Finance<br/>quotes · history · short interest"]
-        Stooq["Stooq<br/>historical backup"]
-        AKShare["AKShare<br/>China A-shares"]
-        SEC["SEC EDGAR<br/>10-K/10-Q · Form 4"]
-        Congress["Congress disclosure feeds"]
-    end
+    DataAPI["whereq.cloud Data API<br/>https://api.whereq.cloud<br/>X-API-Key on every request"]
 
     subgraph AI["LLM providers"]
         Platform["Platform provider<br/>(configured API key)"]
@@ -62,11 +60,7 @@ graph TD
     API <-->|LISTEN user_notifications| DB
     Worker <--> DB
     Collector -->|writes market data| DB
-    Collector -->|HTTPS| Yahoo
-    Collector -->|HTTPS| Stooq
-    Collector -->|HTTPS| AKShare
-    Collector -->|HTTPS| SEC
-    Collector -->|HTTPS| Congress
+    Collector -->|HTTPS + X-API-Key| DataAPI
     API -->|LiteLLM streaming| Platform
     API -->|LiteLLM streaming| BYOK
     Collector -->|internal LLM jobs| Platform
@@ -76,8 +70,8 @@ graph TD
 
 | Process | Entry point | Responsibility | Talks to |
 |---|---|---|---|
-| **API** | `uvicorn api.main:app` | Serves every HTTP/WebSocket route under `/api/v1`, runs the NOVA chat loop, owns the tool registry and skill registry, and hosts the `pg_notify` listener that pushes notifications to open browser tabs. | PostgreSQL, LLM provider, OIDC provider |
-| **Collector** | `python -m flowdesk_collector.scheduler` | Runs the APScheduler job catalogue: symbol-universe seeding, quote polling, history backfill, SEC filings, insider Form 4, short interest. Also owns the market-hours gate that decides whether a collection run is worth making. | PostgreSQL, external data sources |
+| **API** | `uvicorn api.main:app` | Serves every HTTP/WebSocket route under `/api/v1`, runs the NOVA chat loop, owns the tool registry and skill registry, and hosts the `pg_notify` listener that pushes notifications to open browser tabs. | PostgreSQL, LLM provider, OIDC provider, whereq.cloud Data API (lazy on-view fetches) |
+| **Collector** | `python -m flowdesk_collector.scheduler` | Runs the APScheduler job catalogue: instrument-universe sync, quote polling, history backfill, insider Form 4, short interest. Also owns the market-hours gate that decides whether a collection run is worth making. | PostgreSQL, the whereq.cloud Data API |
 | **Frontend** | `nginx` serving `frontend/dist` | Serves the built React SPA and reverse-proxies `/api` to the API container. Disables proxy buffering so Server-Sent Events stream through. | API container |
 
 A fourth entry point, `python -m worker.main`, runs **product jobs only**
@@ -96,12 +90,13 @@ FlowDesktop/
 │   ├── flowdesk/entitlements.py # tier → resource limits
 │   ├── worker/main.py           # product-jobs-only worker entry point
 │   ├── evals/                   # NOVA router + skill regression suite
-│   ├── alembic/                 # migrations (single initial revision)
+│   ├── alembic/                 # migrations (0001_initial_schema, 0002_insider_api_sync)
 │   └── packages/
 │       ├── flowdesk-core/       # flowdesk_core: models, config, db, auth, llm_platform,
-│       │                        #   embeddings, webpush, notifications, schema_check
-│       └── flowdesk-collector/  # flowdesk_collector: scheduler, providers, collectors,
-│                                #   market_hours, pulse, product_jobs
+│       │                        #   embeddings, webpush, notifications, schema_check,
+│       │                        #   whereq_cloud (the Data API client)
+│       └── flowdesk-collector/  # flowdesk_collector: scheduler, collectors, market_hours,
+│                                #   pulse, product_jobs
 ├── frontend/                    # React 19 + Vite 8 + TypeScript 6 SPA
 ├── docker/                      # compose file, Dockerfiles, nginx config, env template
 └── docs/                        # this documentation set
@@ -118,9 +113,9 @@ importing the other's runtime.
 
 ## 2. PostgreSQL schema
 
-One database, 51 tables, created by a single Alembic revision
-(`backend/alembic/versions/0001_initial_schema.py`). The schema is grouped into
-six domains:
+One database, 51 tables, created by the Alembic migration tree
+(`backend/alembic/versions/0001_initial_schema.py`, followed by
+`0002_insider_api_sync.py`). The schema is grouped into six domains:
 
 | Domain | Tables | Purpose |
 |---|---|---|
@@ -172,52 +167,89 @@ refers to it as `python -m flowdesk.schema_check`; the package was renamed to
 
 ## 3. External data sources
 
-The distinguishing property of FlowDesktop is that **the core data collection path
-requires no API keys at all**. Four bundled providers are keyless:
+FlowDesktop has exactly **one** data source: the whereq.cloud Data API at
+`https://api.whereq.cloud`. It is called with the operator's API key, sent in
+the `X-API-Key` header on every request. The key is mandatory — a client
+without one refuses every call — and there is no provider fallback chain.
 
-| Provider | Module | Data | Notes |
+| Source | Module | Data | Notes |
 |---|---|---|---|
-| Yahoo Finance | `flowdesk_collector.providers.yahoo` | Quotes (batched), daily history, stock info, search | Primary price source. `yfinance` under the hood. Priority 1. |
-| Stooq | `flowdesk_collector.providers.stooq` | Daily history only | Backup for history when Yahoo is rate-limiting. Priority 8. |
-| AKShare | `flowdesk_collector.providers.akshare` | Quotes, history, info, search for Shanghai/Shenzhen A-shares; the Chinese name registry | Also implements `ChineseNameProvider`. Priority 2. |
-| SEC EDGAR | `flowdesk_collector.providers.sec_edgar` | CIK map, 10-K/10-Q filings, insider Form 4 transactions | Keyless, but the SEC requires a descriptive `User-Agent` (`SEC_USER_AGENT`). |
+| whereq.cloud Data API | `flowdesk_core.whereq_cloud.WhereqCloudClient` | The instrument universe, quotes, daily history, short interest, Form 4 insider transactions, SEC filing metadata | The only source. `WHEREQ_API_KEY` is required; `WHEREQ_API_URL` overrides the base URL. |
 
-Additional providers exist and are usable when their key is set: `fmp.py`
-(quotes, history, earnings/dividend calendars), `congress_trades.py` (community
-STOCK Act disclosure feeds and an FMP-backed variant), `short_interest.py`
-(Yahoo snapshot), `sec_filings.py` and `sec_insider.py` (parsers over EDGAR
-documents).
+The bundled scrapers — Yahoo Finance, Stooq, AKShare, the SEC EDGAR document
+parsers, FMP, the congressional-disclosure readers and their helpers — have been
+deleted from the repository, along with the bundled CSV symbol universe.
+`flowdesk_collector/providers/` no longer exists.
 
-> The congressional-disclosure dataset URLs in `config.py` default to public
-> object-storage buckets that have returned `403` to anonymous requests since
-> mid-2026. The settings `congress_senate_url` / `congress_house_url` exist so
-> that a working mirror of the same JSON shape can be substituted **without a
-> code change**.
+### 3.1 The endpoints the client uses
 
-### 3.1 Provider abstraction
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/stats` | Dataset counters. |
+| `GET /v1/catalog` | Exchange coverage; each exchange carries its market and currency. |
+| `GET /v1/catalog/symbols?exchange=&sector=&limit=&offset=` | The paginated instrument universe (limit ≤ 10000). |
+| `GET /v1/catalog/symbol/{symbol}` | One instrument's profile. |
+| `GET /v1/equities/{symbol}/quote` | The latest quote. |
+| `GET /v1/equities/quotes?symbols=` | Quotes for a batch — at most 50 symbols per request. |
+| `GET /v1/equities/{symbol}/history?start=&end=&limit=` | Daily OHLCV bars (limit ≤ 2000). |
+| `GET /v1/alt/short-interest/{symbol}` | Short-interest history. |
+| `GET /v1/alt/insider/{symbol}?days=&limit=` | Form 4 insider transactions. |
+| `GET /v1/edgar/filings?cik=&form=&since=&limit=` | SEC filing **metadata** — needs the `filings` scope. |
 
-Every provider implements `flowdesk_collector.providers.base.BaseProvider`, which
-defines five abstract methods: `get_quote`, `get_quotes_batch`, `get_historical`,
-`get_stock_info`, `search_stocks`. The base module also defines the normalised
-return types — `QuoteData`, `HistoricalData`, `StockInfo`, `FundamentalData`,
-`MacroIndicator` — and the `EnrichmentProvider` and `ChineseNameProvider`
-mix-in base classes.
+### 3.2 The client
 
-One detail worth knowing: providers disagree about what a "close" means. Some
-return raw traded prices, some adjust for splits, some for splits and dividends.
-Stitching two providers' series together without recording the convention
+`WhereqCloudClient` lives in `flowdesk-core`, not in the collector, so the API
+and the collector share one implementation of the key handling. It is async and
+built on `httpx`.
+
+- **The key is attached per request**, not only when the HTTP client is
+  constructed, so the header is always present even when a client is injected
+  from the outside.
+- **Errors.** `WhereqCloudError` is the base failure and carries the HTTP
+  `status_code` when the API answered. `WhereqCloudAuthError` covers a 401 or
+  a 403 and — importantly — the case where no key is configured at all.
+- **Retries.** Up to 3 attempts on a 5xx, a 429 or a network error. A 429
+  honours the `Retry-After` header; the other cases back off linearly.
+- **No anonymous path.** Public endpoints on the API are still called with the
+  key — the key is what turns the data on.
+
+One detail worth knowing: sources disagree about what a "close" means. Some
+return raw traded prices, some adjust for splits, some for splits and
+dividends. Stitching two series together without recording the convention
 produces a chart with a fake jump in it. Every historical row therefore carries
 an `adjustment` column with one of four values — `split_adjusted`,
-`split_dividend_adjusted`, `unadjusted`, `unknown` — and the per-provider basis
-is documented in `providers/base.py`.
+`split_dividend_adjusted`, `unadjusted`, `unknown` — taken from the API's own
+`adjustment` field.
 
-### 3.2 Market hours
+### 3.3 The two documented data gaps
+
+Two data sets that earlier releases collected are **not** available through the
+Data API. The tables, tools and UI panels for both still exist and will simply
+be empty.
+
+**SEC filing narrative.** The Data API exposes SEC filing *metadata* — form,
+filing date, accession, document URL — and it addresses filings by **CIK**, not
+by ticker. It does not expose a ticker→CIK mapping, and it does not return the
+10-K/10-Q document narrative that FlowDesktop's filing-grounding index embeds.
+FlowDesktop therefore **does not populate `company_filings` out of the box**.
+The table, the `search_filings` tool, the embedding chunker
+(`collectors/embedding_indexer.py`) and the UI panel all remain — an operator
+can populate the table themselves. `FILINGS_ENABLED` defaults to `False`. The
+`/filings` route in `api/routes/market_data.py` still exists and reads the
+table.
+
+**Congressional trades.** The Data API does not expose congressional (STOCK
+Act) disclosures at all. The `congress_trades` table, the
+`get_congress_trades` tool and the UI panel remain; the table is simply not
+populated.
+
+### 3.4 Market hours
 
 `flowdesk_collector.market_hours` holds a table of UTC trading windows for
 fifteen exchanges, including mid-session lunch breaks for the Chinese and Hong
 Kong markets, and a midnight-wrapping window for Australia. It is a
 weekday-plus-UTC-hour check, **not** a holiday calendar — a best-effort gate
-that keeps the collector from hammering a provider when its feed is closed, not
+that keeps the collector from hammering the API when every market is closed, not
 a strict trading calendar.
 
 ---
@@ -346,8 +378,9 @@ ends with `data: [DONE]\n\n`. Event types:
 graph LR
     Sched["APScheduler<br/>(UTC)"] --> Gate{"market open?"}
     Gate -->|no| Skip["skip — log and return"]
-    Gate -->|yes| Provider["Provider<br/>(Yahoo / Stooq / AKShare)"]
-    Provider --> Map["Map to ORM row"]
+    Gate -->|yes| Client["WhereqCloudClient<br/>X-API-Key on every request"]
+    Client --> API["whereq.cloud Data API<br/>https://api.whereq.cloud"]
+    API --> Map["Map payload to ORM values<br/>(collectors/mapping.py)"]
     Map -->|"ON CONFLICT DO NOTHING"| DB[("PostgreSQL")]
     DB --> Dedup["Dedup ledger<br/>(accession / (symbol,date) / hash)"]
     Dedup --> Next["next symbol"]
@@ -359,10 +392,9 @@ The collector's schedule is registered in `flowdesk_collector.scheduler`.
 
 | Job id | Trigger | Body | Writes |
 |---|---|---|---|
-| `seed_universe` | 00:01 daily | `seed_universe` + `seed_provider_status` | `stocks`, `provider_status` |
+| `sync_universe` | 00:01 daily | `sync_universe` + `seed_provider_status` | `stocks`, `provider_status` |
 | `collect_quotes` | Every `collection_interval_minutes` (default 5) | `collect_quotes` | `quotes` |
 | `collect_history` | Every 4 hours | `collect_history` | `historical_prices` |
-| `collect_filings` | 02:00 daily | `collect_filings` | `company_filings` |
 | `collect_insider` | 02:30 daily | `collect_insider_transactions` | `insider_transactions` |
 | `collect_short_interest` | 03:00 daily | `collect_short_interest` | `short_interest` |
 
@@ -376,9 +408,9 @@ Product jobs, registered by both the collector (all-in-one mode) and the worker
 | `run_sim_snapshots` | 22:00 daily | `run_sim_snapshots` | `sim_snapshots` |
 
 Every job body is wrapped so a failure is logged with a traceback and the next
-scheduled run still happens. A wedged provider call cannot take the scheduler
-down: `socket.setdefaulttimeout` bounds blocking sockets at
-`COLLECTOR_SOCKET_TIMEOUT` seconds (default 60).
+scheduled run still happens. A wedged API call cannot take the scheduler down:
+the client's own timeout bounds each request, and `socket.setdefaulttimeout`
+bounds blocking sockets at `COLLECTOR_SOCKET_TIMEOUT` seconds (default 60).
 
 ### 5.2 Idempotency
 
@@ -389,10 +421,10 @@ than by application logic:
 |---|---|---|
 | `quotes` | `uq_quotes_stock_timestamp` on `(stock_id, timestamp)` | Re-running a collection in the same timestamp is a no-op. |
 | `historical_prices` | `uq_historical_stock_date` on `(stock_id, date)` | Re-fetching a day does not duplicate it. |
-| `company_filings` | `uq_filing_accession` on `accession` | The SEC accession number is globally unique; the collector keeps a local set of known accessions and skips ones already stored. |
-| `insider_transactions` | `uq_insider_txn` on `(accession, line_index)` | One row per Form 4 transaction line. |
+| `company_filings` | `uq_filing_accession` on `accession` | The SEC accession number is globally unique. Not populated by the collector — see [§3.3](#33-the-two-documented-data-gaps). |
+| `insider_transactions` | `uq_insider_txn` on `(accession, line_index)` | One row per Form 4 transaction. `line_index` carries the API's stable platform transaction id, so a re-sync is a no-op. |
 | `short_interest` | `uq_short_interest_symbol_date` on `(symbol, settlement_date)` | One snapshot per settlement date. |
-| `congress_trades` | `uq_congress_trade_hash` on `dedup_hash` | A SHA-1 over chamber, politician, ticker, date, type, and amount. |
+| `congress_trades` | `uq_congress_trade_hash` on `dedup_hash` | A SHA-1 over chamber, politician, ticker, date, type, and amount. Not populated by the collector — see [§3.3](#33-the-two-documented-data-gaps). |
 
 ### 5.3 Incremental backfill
 
@@ -405,12 +437,13 @@ re-downloading a year of daily bars for every symbol on every run. The
 
 The scheduled jobs bound their cost by fetching only *held* symbols (watchlist
 plus portfolio). When a user opens any other stock, `api.services.lazy_market_data`
-fetches that symbol's insider, short-interest, and filings data live, once, and
-caches it in the same tables the scheduled jobs write. Guardrails: the symbol
-must be in the `stocks` universe; a per-symbol `asyncio.Lock` prevents
-concurrent-duplicate fetches; each external call has a timeout; and every
-failure degrades to a no-op so the panel simply self-hides. The whole mechanism
-is disabled by `lazy_market_data_enabled=False`.
+fetches that symbol's insider and short-interest data live, once, and caches it
+in the same tables the scheduled jobs write. Guardrails: the symbol must be in
+the `stocks` universe; a per-symbol `asyncio.Lock` prevents concurrent-duplicate
+fetches; each external call has a timeout; and every failure degrades to a
+no-op so the panel simply self-hides. The whole mechanism is disabled by
+`lazy_market_data_enabled=False`. The filings part of the lazy path is a
+no-op — see [§3.3](#33-the-two-documented-data-gaps).
 
 ---
 
@@ -486,6 +519,11 @@ values — and both are **hard-gated off when `ENV=production`**, regardless of
 the flag. The `DEV_BEARER` path was an authentication bypass in production
 before the gate was added.
 
+The whereq.cloud API key is a server-side credential. It is read from the
+process environment, attached by the client as the `X-API-Key` header, and
+never sent to the browser — the SPA talks only to the FlowDesk API, and the
+API talks to the Data API.
+
 ### 6.6 Payments
 
 The Stripe webhook assigns a realm role to the user. The assignable roles are
@@ -496,21 +534,26 @@ cannot grant an arbitrary role.
 
 ## 7. Key architectural decisions
 
-### 7.1 Keyless data collection as the default
+### 7.1 One keyed data source
 
-**Decision.** The primary price, history, filing, insider, and Chinese-market
-paths use providers that need no credential.
+**Decision.** All market data comes from the whereq.cloud Data API, called with
+the operator's API key. There is one source, no fallback chain, and no bundled
+scraper.
 
-**Why.** The single largest barrier to self-hosting a market-data application is
-key procurement. Keyless sources mean a self-hoster gets a working system with
-no vendor relationships, no quota negotiation, and no per-call cost.
+**Why.** One source with one credential is a contract you can reason about. The
+collector has a single failure mode — the API rejecting the key, rate-limiting
+it, or being down — instead of a matrix of vendor behaviours, and the write
+path has a single payload shape to map. The key also means the deployment
+carries a credential it was issued rather than one it scraped around.
 
-**Trade-off.** Unofficial endpoints carry no service-level guarantee. Yahoo
-Finance rate-limits around 100 requests per minute, so the collector batches
-quotes 50 at a time, sleeps 0.5 s between batches, and sleeps 0.3–0.4 s between
-individual history and SEC requests to stay inside the SEC's 10-requests-per-second
-limit. The application degrades to "no data for this symbol" rather than
-failing. Key-based providers remain available as optional upgrades.
+**Trade-off.** Market data is no longer free to fetch, and the API's quotas
+apply to a self-hoster. The client mitigates the transient cases — three
+attempts on a 5xx or a 429, honouring `Retry-After` — and the collector keeps
+its own pacing: quotes go out in batches of 50, and the alternative-data jobs
+are capped at `SYNC_MAX_SYMBOLS` symbols per run. The application degrades to
+"no data for this symbol" rather than failing. Two data sets the API does not
+expose — filing narratives and congressional disclosures — are documented in
+[§3.3](#33-the-two-documented-data-gaps).
 
 ### 7.2 Three processes, with the collector separable
 
@@ -605,8 +648,8 @@ Rows are never hard-deleted.
 
 **Why.** Delisted companies still have history, quotes, and filings that users
 may want to look up. Hard-deleting them would destroy the historical record and
-break the foreign keys from `quotes` and `historical_prices`. The universe
-seeder updates descriptive fields on an existing symbol but never resurrects an
+break the foreign keys from `quotes` and `historical_prices`. The universe sync
+updates descriptive fields on an existing symbol but never resurrects an
 inactive one — deactivation is a deliberate decision.
 
 **Trade-off.** Every read path must filter on `is_active`, and a forgotten

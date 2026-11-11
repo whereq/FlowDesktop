@@ -60,8 +60,9 @@ services:
       retries: 3
 
   # ── Collector ────────────────────────────────────────────────────────────
-  # Fills the database: quotes, history, SEC filings, insider activity and
-  # short interest. Uses only keyless public sources by default.
+  # Syncs the database from the whereq.cloud Data API with your API key:
+  # the instrument universe, quotes, history, short interest and insider
+  # activity. There is no bundled scraper, so WHEREQ_API_KEY is required.
   collector:
     build:
       context: ..

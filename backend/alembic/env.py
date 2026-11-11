@@ -43,17 +43,40 @@ target_metadata = Base.metadata
 REQUIRED_EXTENSIONS = ("vector", "pg_trgm")
 
 
-def _database_url() -> str:
-    """Resolve the database URL from settings, falling back to the environment."""
-    url = get_settings().database_url
-    if not url:
-        url = os.getenv("DATABASE_URL", "")
-    if not url:
-        raise RuntimeError(
-            "No database URL configured. Set DATABASE_URL in your environment "
-            "or in backend/.env before running migrations."
-        )
+def _to_sync_url(url: str) -> str:
+    """Translate an async SQLAlchemy URL into a synchronous one.
+
+    Alembic drives a *sync* engine. Handing it a ``postgresql+asyncpg://``
+    URL makes SQLAlchemy try to drive the async driver synchronously, which
+    fails with ``MissingGreenlet`` — so the driver is swapped for a
+    synchronous one.
+    """
+    for async_driver in ("+asyncpg", "+psycopg", "+aiomysql", "+asyncmy"):
+        if async_driver in url:
+            return url.replace(async_driver, "+psycopg2", 1)
     return url
+
+
+def _database_url() -> str:
+    """Resolve the *synchronous* database URL for Alembic.
+
+    Precedence:
+
+    1. ``DATABASE_URL_SYNC`` — an explicit synchronous URL.
+    2. ``DATABASE_URL`` (or the ``.env`` file) — translated to sync.
+    3. The shipped default.
+    """
+    settings = get_settings()
+
+    explicit_sync = os.getenv("DATABASE_URL_SYNC", "").strip()
+    if explicit_sync:
+        return explicit_sync
+
+    async_url = (settings.database_url or "").strip()
+    if async_url:
+        return _to_sync_url(async_url)
+
+    return settings.database_url_sync
 
 
 def _ensure_extensions(connection) -> None:

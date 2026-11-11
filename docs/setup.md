@@ -3,10 +3,11 @@
 A complete getting-started guide for running FlowDesktop on your own machine or
 your own infrastructure.
 
-FlowDesktop is self-hostable. The bundled data providers — Yahoo Finance, Stooq,
-AKShare, SEC EDGAR — need **no API keys**, so a working installation needs only
-a database, an identity provider, and one LLM credential (or none at all, if
-every user brings their own).
+FlowDesktop is self-hostable. Every piece of market data comes from the
+**whereq.cloud Data API**, which requires an API key — there is no anonymous
+path and no bundled scraper. A working installation needs a database, a
+whereq.cloud API key, an identity provider, and one LLM credential (or none at
+all, if every user brings their own).
 
 **Contents**
 
@@ -16,7 +17,7 @@ every user brings their own).
 4. [Install path C — local backend only](#4-install-path-c--local-backend-only)
 5. [Configuration reference](#5-configuration-reference)
 6. [Database setup](#6-database-setup)
-7. [Seeding the symbol universe](#7-seeding-the-symbol-universe)
+7. [Syncing the symbol universe](#7-syncing-the-symbol-universe)
 8. [Running the collector](#8-running-the-collector)
 9. [Pointing at your own identity provider](#9-pointing-at-your-own-identity-provider)
 10. [Choosing an LLM mode](#10-choosing-an-llm-mode-platform-vs-byok)
@@ -32,6 +33,7 @@ every user brings their own).
 | **Python** | 3.12 or newer | The backend declares `requires-python = ">=3.12"`. |
 | **Node.js** | 20 or newer | The frontend build uses Vite 8 and TypeScript 6. Node 22 is used in the production image. |
 | **PostgreSQL** | 17 | With the `vector` and `pg_trgm` extensions available. |
+| **A whereq.cloud API key** | Any | Required for every market-data request. See [§1.2](#12-the-whereqcloud-api-key). |
 | **An OIDC provider** | Any | Must issue RS256 JWTs with a realm-roles claim. See [§9](#9-pointing-at-your-own-identity-provider). |
 | **Docker** (path A only) | Any recent version | With the Compose plugin. |
 
@@ -60,6 +62,46 @@ If the extension files are not installed on the server, PostgreSQL will refuse
 the command with `could not open extension control file`. Install the
 pgvector package for your distribution and restart PostgreSQL.
 
+### 1.2 The whereq.cloud API key
+
+FlowDesktop is a **client** of the whereq.cloud Data API at
+`https://api.whereq.cloud`. Every quote, every daily bar, every short-interest
+snapshot and every Form 4 transaction in the database was fetched from that API
+with your key. There is no bundled scraper and no anonymous endpoint: the key
+is what turns the data on, and the client refuses every request when one is
+missing.
+
+Get a key from your whereq.cloud dashboard, then put it in the environment.
+
+For a local backend run — `backend/.env`:
+
+```bash
+WHEREQ_API_KEY=your-key-here
+```
+
+For the compose stack — `docker/.env`:
+
+```bash
+WHEREQ_API_KEY=your-key-here
+```
+
+The key is sent in the `X-API-Key` header on every request. A key may carry
+scopes; the `filings` scope is required for the SEC endpoints. A rejected key
+raises a clear authentication error rather than an empty result, and the API
+logs a loud warning at boot when `WHEREQ_API_KEY` is missing — it never refuses
+to start, so a missing key shows up as "no data", not as a crash.
+
+Two further settings control the connection:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WHEREQ_API_URL` | `https://api.whereq.cloud` | The API base URL. Override only for a self-hosted or regional deployment. |
+| `WHEREQ_API_TIMEOUT` | `30.0` | The per-request timeout, in seconds. |
+
+Two data sets the Data API does not carry — SEC filing *narrative* and
+congressional (STOCK Act) disclosures — are covered in
+[§8.4](#84-the-two-data-gaps).
+
 ---
 
 ## 2. Install path A — Docker Compose
@@ -87,6 +129,10 @@ DB_PORT=5432
 # ── Ports ──────────────────────────────────────────────────────────────────
 API_PORT=8000
 FRONTEND_PORT=8080
+
+# ── whereq.cloud Data API (required for market data) ──────────────────────
+WHEREQ_API_KEY=your-key-here
+WHEREQ_API_URL=https://api.whereq.cloud
 
 # ── Identity provider (OIDC) ───────────────────────────────────────────────
 KEYCLOAK_URL=https://auth.example.com
@@ -138,24 +184,29 @@ curl http://localhost:8000/api/v1/health
 
 Then open the frontend at `http://localhost:8080`.
 
-### 2.4 Seed the universe
+### 2.4 Sync the universe
 
-The compose stack starts the collector, which seeds the symbol universe at
-00:01 UTC. To do it immediately instead, run the seeder once:
+The compose stack starts the collector, which syncs the instrument universe from
+the whereq.cloud catalog at 00:01 UTC. To do it immediately instead, run the
+sync once:
 
 ```bash
 docker compose -f docker/docker-compose.yml exec api python -c "
 import asyncio
 from flowdesk_core.database import AsyncSessionLocal
-from flowdesk_collector.collectors.universe import seed_universe
+from flowdesk_collector.collectors.universe import sync_universe
 
 async def main():
     async with AsyncSessionLocal() as s:
-        print(await seed_universe(s))
+        print(await sync_universe(s))
 
 asyncio.run(main())
 "
 ```
+
+The command needs `WHEREQ_API_KEY` in the environment of the container, or it
+fails with an authentication error. See [§7](#7-syncing-the-symbol-universe) for
+what the sync does.
 
 ### 2.5 Verify the schema
 
@@ -222,16 +273,23 @@ cp ../docker/.env.example .env
 ```
 
 Edit it. The critical setting for a local run is the database URL — the
-defaults point at `localhost:5432` with the credentials `flowdesk:flowdesk`:
+defaults point at `localhost:5432` with the credentials `flowdesktop:flowdesktop`:
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://flowdesktop:flowdesk@localhost:5432/flowdesk
-DATABASE_URL_SYNC=postgresql://flowdesktop:flowdesk@localhost:5432/flowdesk
+DATABASE_URL=postgresql+asyncpg://flowdesktop:flowdesktop@localhost:5432/flowdesktop
+DATABASE_URL_SYNC=postgresql://flowdesktop:flowdesktop@localhost:5432/flowdesktop
 ```
 
-The other settings the backend reads — `KEYCLOAK_URL`, `KEYCLOAK_REALM`,
-`KEYCLOAK_CLIENT_ID`, `OPENAI_API_KEY`, and so on — are documented in
-[§5](#5-configuration-reference).
+And the whereq.cloud API key, without which there is no market data at all
+([§1.2](#12-the-whereqcloud-api-key)):
+
+```bash
+WHEREQ_API_KEY=your-key-here
+```
+
+The other settings the backend reads — `WHEREQ_API_URL`, `KEYCLOAK_URL`,
+`KEYCLOAK_REALM`, `KEYCLOAK_CLIENT_ID`, `OPENAI_API_KEY`, and so on — are
+documented in [§5](#5-configuration-reference).
 
 > `backend/.env` is git-ignored. Never commit credentials.
 
@@ -239,7 +297,7 @@ The other settings the backend reads — `KEYCLOAK_URL`, `KEYCLOAK_REALM`,
 
 ```bash
 createdb flowdesktop
-psql -d flowdesk -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql -d flowdesktop -c "CREATE EXTENSION IF NOT EXISTS vector;"
 psql -d flowdesktop -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 ```
 
@@ -247,9 +305,9 @@ Or with Docker:
 
 ```bash
 docker run -d --name flowdesktop-db \
-  -e POSTGRES_USER=flowdesk \
-  -e POSTGRES_PASSWORD=flowdesk \
-  -e POSTGRES_DB=flowdesk \
+  -e POSTGRES_USER=flowdesktop \
+  -e POSTGRES_PASSWORD=flowdesktop \
+  -e POSTGRES_DB=flowdesktop \
   -p 5432:5432 \
   postgres:17
 ```
@@ -402,11 +460,13 @@ LLM can run in BYOK mode. These are the settings you will normally set:
 
 | Variable | Setting | Default | Purpose |
 |---|---|---|---|
-| `DATABASE_URL` | `database_url` | `postgresql+asyncpg://flowdesk:flowdesk@localhost:5432/flowdesk` | The asyncpg connection string. **Must be set for a non-default database.** |
-| `DATABASE_URL_SYNC` | `database_url_sync` | `postgresql://flowdesk:flowdesk@localhost:5432/flowdesk` | The synchronous connection string, used by Alembic and sync tooling. |
+| `DATABASE_URL` | `database_url` | `postgresql+asyncpg://flowdesktop:flowdesktop@localhost:5432/flowdesktop` | The asyncpg connection string. **Must be set for a non-default database.** |
+| `DATABASE_URL_SYNC` | `database_url_sync` | `postgresql://flowdesktop:flowdesktop@localhost:5432/flowdesktop` | The synchronous connection string, used by Alembic and sync tooling. |
+| `WHEREQ_API_KEY` | `whereq_api_key` | `""` | The whereq.cloud Data API key. **Required for market data.** Without it every data request fails with an authentication error and the app serves no quotes, history, insider activity or short interest. |
 | `KEYCLOAK_URL` | `keycloak_url` | `https://auth.example.com` | The OIDC issuer root — the base URL, without the realm path. |
 | `KEYCLOAK_REALM` | `keycloak_realm` | `flowdesktop.local` | The realm that holds your users and roles. |
 | `KEYCLOAK_CLIENT_ID` | `keycloak_client_id` | `flowdesk-spa` | The public (SPA) client the frontend authenticates against. The backend validates the `azp` claim against this value. |
+| `KEYCLOAK_CLIENT_SECRET` | `keycloak_client_secret` | `""` | The client secret, when your realm uses a confidential client. Leave blank for a public client with PKCE. |
 | `VITE_KEYCLOAK_URL` | — | — | The same issuer root, for the **frontend build**. |
 | `VITE_KEYCLOAK_REALM` | — | — | The same realm, for the frontend build. |
 | `VITE_KEYCLOAK_CLIENT_ID` | — | — | The same client id, for the frontend build. |
@@ -417,10 +477,10 @@ LLM can run in BYOK mode. These are the settings you will normally set:
 |---|---|---|
 | `COLLECTION_INTERVAL_MINUTES` | `5` | How often the quote collector runs. |
 | `HISTORICAL_DAYS` | `365` | The history backfill window. |
-| `STOOQ_REQUEST_DELAY` | `2.0` | Seconds between Stooq requests. |
-| `SEC_USER_AGENT` | `FlowDesktop flowdesktop@example.com` | The `User-Agent` sent to SEC EDGAR. The SEC asks automated clients to identify themselves with a contact address — set this to something like `Your Name you@example.com`. |
-| `COLLECTOR_SOCKET_TIMEOUT` | `60` | Seconds before a blocking provider socket times out. Read directly from the environment, not from `Settings`. |
-| `COLLECTOR_JS_LOCK_TIMEOUT` | `30` | Seconds before a collector JS-context lock times out. |
+| `SYNC_MAX_SYMBOLS` | `200` | Symbols synced per alternative-data run (insider, short interest). |
+| `WHEREQ_API_URL` | `https://api.whereq.cloud` | The whereq.cloud Data API base URL. |
+| `WHEREQ_API_TIMEOUT` | `30.0` | The Data API per-request timeout, in seconds. |
+| `COLLECTOR_SOCKET_TIMEOUT` | `60` | Seconds before a blocking socket times out. Read directly from the environment, not from `Settings`. |
 | `SERVICE_NAME` | a legacy collector label | The service label in log output. Set it to `flowdesktop-collector` for clarity. |
 | `ENV` | `dev` | `production` hard-disables the development auth shortcuts. |
 
@@ -487,25 +547,36 @@ print(base64.b64encode(v.private_pem_bytes_raw).decode())
 "
 ```
 
-### 5.7 Optional data providers
+### 5.7 Market data
 
-All empty by default. The bundled keyless providers need none of these.
+Market data comes from one source: the whereq.cloud Data API. There is no
+per-provider key to configure and no provider fallback chain — the bundled
+scrapers are gone.
 
-`ALPHA_VANTAGE_API_KEY`, `FINNHUB_API_KEY`, `TWELVE_DATA_API_KEY`,
-`POLYGON_API_KEY`, `TIINGO_API_KEY`, `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
-`FMP_API_KEY`, `FRED_API_KEY`, `TUSHARE_TOKEN`, `JQUANTS_API_KEY`,
-`JQUANTS_EMAIL`, `JQUANTS_PASSWORD`, `JQUANTS_REFRESH_TOKEN`.
+| Variable | Setting | Default | Purpose |
+|---|---|---|---|
+| `WHEREQ_API_KEY` | `whereq_api_key` | `""` | The Data API key, sent as `X-API-Key` on every request. Mandatory. |
+| `WHEREQ_API_URL` | `whereq_api_url` | `https://api.whereq.cloud` | The API base URL. |
+| `WHEREQ_API_TIMEOUT` | `whereq_api_timeout` | `30.0` | The per-request timeout, in seconds. |
+| `SYNC_MAX_SYMBOLS` | `sync_max_symbols` | `200` | Symbols synced per alternative-data run. |
+
+The earlier per-provider variables — `ALPHA_VANTAGE_API_KEY`,
+`FINNHUB_API_KEY`, `TWELVE_DATA_API_KEY`, `POLYGON_API_KEY`, `TIINGO_API_KEY`,
+`ALPACA_API_KEY`, `ALPACA_API_SECRET`, `FMP_API_KEY`, `FRED_API_KEY`,
+`TUSHARE_TOKEN`, `JQUANTS_*`, `STOOQ_REQUEST_DELAY`, `CONGRESS_SENATE_URL`,
+`CONGRESS_HOUSE_URL` and `SEC_USER_AGENT` — have been removed with the
+providers they belonged to. Setting them has no effect.
 
 ### 5.8 Feature flags
 
 | Variable | Default | Effect |
 |---|---|---|
 | `SIM_ENABLED` | `True` | The paper-trading simulator. When false, its routes return 404 and the matcher and snapshot jobs no-op. |
-| `LAZY_MARKET_DATA_ENABLED` | `True` | On-view fetching of insider, short-interest, and filings data. |
-| `FILINGS_ENABLED` | `True` | The filings grounding pipeline. |
+| `LAZY_MARKET_DATA_ENABLED` | `True` | On-view fetching of insider and short-interest data. |
+| `FILINGS_ENABLED` | `False` | The filings grounding pipeline. **Off by default** — the Data API does not carry the filing narrative. See [§8.4](#84-the-two-data-gaps). |
 | `INSIDER_ENABLED` | `True` | The insider Form 4 collector. |
 | `SHORT_INTEREST_ENABLED` | `True` | The short-interest collector. |
-| `CONGRESS_TRADES_ENABLED` | `True` | The congressional-disclosure collector. |
+| `CONGRESS_TRADES_ENABLED` | `True` | The congressional-disclosure surface. The table is not populated out of the box — see [§8.4](#84-the-two-data-gaps). |
 | `PROACTIVE_INSIGHTS_ENABLED` | `False` | NOVA Pulse proactive insight delivery. Opt-in. |
 | `PULSE_TUNE_ENABLED` | `True` | Auto-tuning the Pulse relevance cutoff from feedback. |
 
@@ -564,7 +635,7 @@ SQL
 ### 6.2 Create the extensions
 
 ```bash
-psql -d flowdesk -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql -d flowdesktop -c "CREATE EXTENSION IF NOT EXISTS vector;"
 psql -d flowdesktop -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 ```
 
@@ -578,8 +649,9 @@ cd FlowDesktop/backend
 alembic upgrade head
 ```
 
-This applies the single initial revision, which creates all 51 tables, 78
-indexes, and the unique constraints.
+This applies the migration tree. `0001_initial_schema` creates all 51 tables,
+78 indexes, and the unique constraints; `0002_insider_api_sync` relaxes the two
+insider-transaction columns the Data API does not fill.
 
 ### 6.4 Verify
 
@@ -604,56 +676,66 @@ head` again, or reconcile the schema.
 
 ---
 
-## 7. Seeding the symbol universe
+## 7. Syncing the symbol universe
 
-The universe ships as `backend/packages/flowdesk-collector/flowdesk_collector/data/universe.csv`
-— a plain list of roughly 6,100 symbols with their name, exchange, sector,
-industry, market cap, market, currency, priority tier, and active flag.
+The instrument universe is **not** bundled. It comes from the whereq.cloud Data
+API catalog, and the `stocks` table is a projection of that catalog.
 
-It is a **starting point**, not gospel. Edit it, or replace it with your own
-list of symbols, then re-run the collector.
+There is no CSV to edit any more — the one that used to ship with the collector
+was removed together with the bundled providers.
 
-The columns are:
+The sync walks the catalog **exchange by exchange**. That order matters: the
+catalog's exchange list carries each exchange's market and currency, and the
+per-symbol listing does not, so the symbol rows would otherwise have no market
+or currency.
+
+The fields it writes are:
 
 ```
 symbol, name, name_cn, exchange, sector, industry, market_cap, market, currency, priority_tier, is_active
 ```
 
-Symbols are stored in Yahoo Finance canonical format — a bare ticker for US
-markets, `600519.SS` for Shanghai, `000858.SZ` for Shenzhen.
+`market` and `currency` come from the exchange entry; everything else comes
+from the instrument's own catalog row. Symbols are stored in the catalog's
+canonical ticker format — a bare ticker for US markets, `600519.SS` for
+Shanghai, `000858.SZ` for Shenzhen.
 
-### 7.1 Seed
+### 7.1 Sync
 
 ```bash
 cd FlowDesktop/backend
 python -c "
 import asyncio
 from flowdesk_core.database import AsyncSessionLocal
-from flowdesk_collector.collectors.universe import seed_universe
+from flowdesk_collector.collectors.universe import sync_universe
 
 async def main():
     async with AsyncSessionLocal() as s:
-        print(await seed_universe(s))
+        print(await sync_universe(s))
 
 asyncio.run(main())
 "
 ```
 
 ```
-{'inserted': 6107, 'updated': 0, 'total': 6107}
+{'inserted': 6107, 'updated': 0, 'deactivated': 0, 'total': 6107}
 ```
 
-The collector's `seed_universe` job does the same thing at 00:01 UTC, so you
-only need to run it manually if you want the data immediately.
+The command reads the Data API, so `WHEREQ_API_KEY` must be set. The
+collector's `sync_universe` job does the same thing at 00:01 UTC, so you only
+need to run it by hand if you want the data immediately.
 
-### 7.2 What the seeder does and does not do
+### 7.2 What the sync does and does not do
 
-- It **inserts** symbols that are not in the database.
-- It **updates** the descriptive fields of existing symbols — name, Chinese
-  name, exchange, sector, industry, market cap.
-- It **never resurrects an inactive symbol**. A symbol that has been
-  deactivated stays deactivated until you deliberately change `is_active` in
-  the CSV.
+- It **inserts** instruments that are not in the database.
+- It **updates** the descriptive fields of existing instruments — name, Chinese
+  name, exchange, sector, market, currency, market cap.
+- It **soft-deletes** instruments the catalog no longer lists: they are marked
+  `is_active = False` and their rows stay.
+- It **never resurrects an inactive symbol** — an instrument you deactivated by
+  hand stays deactivated.
+- It **never hard-deletes** a row. Quotes, history and insider transactions
+  still reference it, and the historical record has value.
 
 ### 7.3 The soft-delete convention
 
@@ -661,9 +743,16 @@ only need to run it manually if you want the data immediately.
 never deleted: quotes, history, filings, and insider transactions all reference
 it, and the historical record has value.
 
-Every read path filters on `is_active`. To deactivate a symbol, set
-`is_active` to `f` in the CSV and re-run the seeder — the seeder will not
-overwrite the flag, so edit it deliberately.
+Every read path filters on `is_active`. To deactivate a symbol by hand, set
+`is_active = false` on its `stocks` row:
+
+```sql
+UPDATE stocks SET is_active = false WHERE symbol = 'AAPL';
+```
+
+The sync updates the descriptive fields of an existing symbol but never
+touches `is_active`, so a symbol you deactivate by hand stays deactivated —
+deactivation is a deliberate decision, not a side effect of the next run.
 
 ---
 
@@ -680,10 +769,9 @@ All schedules are UTC.
 
 | Job | Schedule | What it does |
 |---|---|---|
-| `seed_universe` | 00:01 daily | Seeds the symbol universe and the provider status table. |
+| `sync_universe` | 00:01 daily | Syncs the instrument universe from the Data API catalog, and seeds the source-status table. |
 | `collect_quotes` | Every 5 minutes | Fetches the latest quote for every active symbol. Skipped entirely when all markets are closed. |
 | `collect_history` | Every 4 hours | Backfills daily OHLCV for symbols whose data is older than 7 days. Capped at 200 symbols per run. |
-| `collect_filings` | 02:00 daily | Fetches the latest 10-K/10-Q per symbol from SEC EDGAR. |
 | `collect_insider` | 02:30 daily | Fetches recent Form 4 insider transactions. |
 | `collect_short_interest` | 03:00 daily | Fetches short-interest snapshots. |
 
@@ -715,20 +803,44 @@ asyncio.run(main())
 
 ### 8.3 Collection etiquette
 
-The collector is polite to the public sources:
+Every collection job talks to one metered service, the whereq.cloud Data API,
+so the pacing lives in the client rather than in each collector:
 
-- Quotes are fetched in batches of 50 with a 0.5 s pause between batches.
-- History, filings, insider, and short-interest collection pause 0.3–0.4 s
-  between symbols, staying inside the SEC's 10-requests-per-second limit.
+- Quotes are fetched in batches of 50 — the API's per-request cap — one
+  request per batch.
+- The client retries a transient failure (a 5xx, a 429 or a network error) up
+  to three attempts, and honours the `Retry-After` header on a 429.
+- A failed batch is logged and the remaining batches continue; the symbols in
+  it are counted as failed.
 
-If you add a provider, follow the same pattern.
+If you add a collector against the same API, keep the batching and let the
+client handle the retries.
 
-### 8.4 A note on the congressional-disclosure feeds
+### 8.4 The two data gaps
 
-The default `congress_senate_url` and `congress_house_url` point at public
-object-storage buckets that have returned `403` to anonymous requests since
-mid-2026. To activate congressional-trade ingestion, point these settings at a
-working mirror of the same JSON shape. No code change is needed.
+Two data sets that older FlowDesktop releases collected are **not** available
+through the Data API. Both are stated here plainly, because the tables and the
+UI panels for them still exist and will simply be empty.
+
+**SEC filing narrative.** The Data API exposes SEC filing *metadata* — form,
+filing date, accession, document URL — and it addresses filings by **CIK**, not
+by ticker. It does not expose a ticker→CIK mapping, and it does not return the
+10-K/10-Q document text that FlowDesktop's filing-grounding index embeds.
+Therefore FlowDesktop **does not populate `company_filings` out of the box**.
+The table, the `search_filings` tool, the embedding chunker and the UI panel
+are all still there — **populate the table yourself** (or point the collector
+at your own source) and the feature works. `FILINGS_ENABLED` defaults to
+`False` for that reason.
+
+**Congressional trades.** The Data API does not expose congressional (STOCK
+Act) disclosures at all. The `congress_trades` table, the `get_congress_trades`
+tool and the UI panel remain; the table is simply not populated. Populate it
+yourself to turn the panel on.
+
+The `/filings` route in `api/routes/market_data.py` still exists and reads the
+`company_filings` table — it serves whatever is in there.
+
+`docs/data-sources.md` covers the same two gaps from the API's side.
 
 ---
 
@@ -736,6 +848,16 @@ working mirror of the same JSON shape. No code change is needed.
 
 FlowDesktop expects a Keycloak-style OIDC provider. The requirement is
 generic; any provider that satisfies it works.
+
+**The identity provider is yours.** FlowDesktop ships no provider and no
+accounts: the shipped values (`https://auth.example.com`, realm
+`flowdesktop`, client `flowdesk-spa`) are **placeholders**, and they are
+recognised as such. While they are still in place, every authenticated route
+answers **503** with a clear "Authentication is not configured" message instead
+of an opaque error, and the API logs a warning at boot. Replace all three
+values — `KEYCLOAK_URL`, `KEYCLOAK_REALM` and `KEYCLOAK_CLIENT_ID` — with your
+own before serving traffic. The API never refuses to boot on this; it warns,
+and the 503s tell you what is wrong.
 
 ### 9.1 What the backend requires
 
@@ -791,7 +913,8 @@ the free trial and the paid tiers.
 
 ### 9.4 Configuring it
 
-Backend (`backend/.env`):
+Backend (`backend/.env`) — the three values below are the shipped placeholders,
+so replace them with your own provider's issuer, realm and client id:
 
 ```bash
 KEYCLOAK_URL=https://auth.example.com
@@ -950,7 +1073,7 @@ Check that PostgreSQL is running and that `DATABASE_URL` matches. Inside the
 compose stack the hostname is `db`, not `localhost`:
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://flowdesktop:flowdesk@db:5432/flowdesk
+DATABASE_URL=postgresql+asyncpg://flowdesktop:flowdesktop@db:5432/flowdesktop
 ```
 
 **`password authentication failed for user`.** The credentials in
@@ -995,6 +1118,11 @@ the same realm — for example a command-line client. In development, set
 `DEV_AZP_OVERRIDE` to the extra client id. In production, issue the token for
 the SPA client.
 
+**503 "Authentication is not configured".** `KEYCLOAK_URL`, `KEYCLOAK_REALM` or
+`KEYCLOAK_CLIENT_ID` still carries the shipped placeholder
+(`https://auth.example.com`). Point all three at your own provider — see
+[§9](#9-pointing-at-your-own-identity-provider).
+
 **503 "Authentication service temporarily unavailable".** The identity
 provider is unreachable and no JWKS is cached. The backend caches keys for an
 hour and serves stale ones when a refresh fails, so this only happens on a cold
@@ -1030,25 +1158,37 @@ progress indicator; the answer resumes when the tools return.
 buffering reverse proxy is holding the SSE frames. Set `proxy_buffering off`
 and a long `proxy_read_timeout` on the `/api` location.
 
-### The collector
+### The collector and market data
 
 **"All markets closed — skipping quote collection".** Working as intended. The
 quote job checks the market-hours table and skips when every exchange is
 closed.
+
+**Every request fails with "No whereq.cloud API key configured".**
+`WHEREQ_API_KEY` is not set in the environment the process reads. Put it in
+`backend/.env` (local) or `docker/.env` (compose) and restart the API and the
+collector. See [§1.2](#12-the-whereqcloud-api-key).
+
+**"whereq.cloud rejected the API key (401)".** The key is wrong, expired, or
+lacks the scope the endpoint needs. The `filings` scope is required for the SEC
+endpoints.
+
+**"whereq.cloud rate limit reached".** The API is throttling this account. The
+client already retries a 429 three times and honours `Retry-After`; if it still
+fails, raise `COLLECTION_INTERVAL_MINUTES` and lower `SYNC_MAX_SYMBOLS`.
 
 **No quotes are collected.** Check that the symbol is in the `stocks` table
 with `is_active = True`, and that the collector has been running long enough
 for a cycle. Note that the market-hours check is a weekday-and-UTC-hour test,
 not a holiday calendar — it does not know about public holidays.
 
-**Rate limits from a provider.** The collector batches and paces its requests,
-but a large universe will still draw attention. Reduce
-`COLLECTION_INTERVAL_MINUTES`, or trim `universe.csv` to the symbols you
-actually want.
+**The filings or congressional panels are always empty.** That is expected: the
+Data API does not carry filing narratives or congressional disclosures. See
+[§8.4](#84-the-two-data-gaps).
 
 **The collector logs "Job ... failed" repeatedly.** The traceback in the log
 names the failing collector. Most common causes are a network failure to the
-provider or a schema mismatch.
+Data API, a missing API key, or a schema mismatch.
 
 ### The simulator
 

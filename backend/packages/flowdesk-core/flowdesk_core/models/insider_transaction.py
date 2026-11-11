@@ -1,8 +1,9 @@
 """InsiderTransaction — one SEC Form 4 non-derivative transaction.
 
-Populated by the collect_insider_trades job from EDGAR Form 4 ownership documents;
-queried by the get_insider_activity tool. One row per transaction line; deduped by
-(accession, line_index). See docs/design/RFC_NOVA_INSIDER_ACTIVITY.md.
+Synced from the whereq.cloud Data API (``/v1/alt/insider/{symbol}``); queried
+by the get_insider_activity tool. One row per transaction; deduped by
+(accession, line_index), where `line_index` carries the API's stable
+transaction id. See docs/design/RFC_NOVA_INSIDER_ACTIVITY.md.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from sqlalchemy import (
     Date,
     DateTime,
     Index,
-    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -38,9 +38,14 @@ class InsiderTransaction(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    cik: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Optional: the whereq.cloud Data API addresses insider activity by
+    # ticker, not by CIK, so a synced row has no CIK. It stays NOT NULL for
+    # rows that were parsed straight from an EDGAR Form 4 document.
+    cik: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     accession: Mapped[str] = mapped_column(String(30), nullable=False)
-    line_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The platform row id of the transaction. It is stable across syncs, so
+    # it is what keeps (accession, line_index) unique and the sync idempotent.
+    line_index: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
     filing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     transaction_date: Mapped[date | None] = mapped_column(Date, nullable=True)

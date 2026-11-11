@@ -30,12 +30,18 @@ owns the process lifespan.
 ```
 startup:
   await init_db()                      # SELECT 1 only — never create_all
+  _report_configuration()              # warn about a missing API key / unconfigured IdP
   _pg_listener_task = asyncio.create_task(start_pg_listener(settings.database_url))
 
 shutdown:
   _pg_listener_task.cancel()
   await _pg_listener_task              # swallow CancelledError
 ```
+
+**`_report_configuration`.** Logs a loud warning when `WHEREQ_API_KEY` is
+missing (no market data will be served) and when the identity provider is
+unconfigured (every authenticated route will answer 503). It never raises: a
+missing credential is an operator problem, not a reason to refuse to boot.
 
 **Router mounting.** All routers except `public_pages` are mounted under
 `/api/v1`. `public_pages` is mounted at the root because its routes are
@@ -119,20 +125,27 @@ must be a JSON array: `CORS_ORIGINS='["http://localhost:5173"]'`.
 
 | Field | Type | Default | Env var |
 |---|---|---|---|
-| `database_url` | `str` | `postgresql+asyncpg://flowdesk:flowdesk@localhost:5432/flowdesk` | `DATABASE_URL` |
-| `database_url_sync` | `str` | `postgresql://flowdesk:flowdesk@localhost:5432/flowdesk` | `DATABASE_URL_SYNC` |
+| `database_url` | `str` | `postgresql+asyncpg://flowdesktop:flowdesktop@localhost:5432/flowdesktop` | `DATABASE_URL` |
+| `database_url_sync` | `str` | `postgresql://flowdesktop:flowdesktop@localhost:5432/flowdesktop` | `DATABASE_URL_SYNC` |
 
-*Collection API keys — all optional, all default to `""`.*
+*whereq.cloud Data API.*
 
-`alpha_vantage_api_key`, `finnhub_api_key`, `twelve_data_api_key`,
-`polygon_api_key`, `tiingo_api_key`, `alpaca_api_key`, `alpaca_api_secret`,
-`fmp_api_key`, `fred_api_key`, `eia_api_key`, `autodev_api_key`,
-`hud_api_token`, `tushare_token`, `jquants_api_key`, `jquants_email`,
-`jquants_password`, `jquants_refresh_token`, `opencorporates_api_key`.
+| Field | Type | Default | Env var |
+|---|---|---|---|
+| `whereq_api_key` | `str` | `""` | `WHEREQ_API_KEY` |
+| `whereq_api_url` | `str` | `https://api.whereq.cloud` | `WHEREQ_API_URL` |
+| `whereq_api_timeout` | `float` | `30.0` | `WHEREQ_API_TIMEOUT` |
 
-> The source file declares several of these names twice (`autodev_api_key`,
-> `hud_api_token`, `tushare_token`, `jquants_*`). Python keeps the last
-> definition, so the behaviour is unambiguous, but the duplication is a wart.
+The key is **mandatory for market data**: the client refuses every request when
+one is not configured, and there is no anonymous path. Public endpoints on the
+API are still called with the key — the key is what turns the data on. A key
+may carry scopes; the `filings` scope is required for the SEC endpoints.
+
+> The per-vendor keys that used to live here — `alpha_vantage_api_key`,
+> `finnhub_api_key`, `twelve_data_api_key`, `polygon_api_key`, `tiingo_api_key`,
+> `alpaca_api_key`, `alpaca_api_secret`, `fmp_api_key`, `fred_api_key`,
+> `tushare_token`, `jquants_*` and the rest — have been removed together with
+> the providers they belonged to. Setting them has no effect.
 
 *Collection tuning.*
 
@@ -140,7 +153,7 @@ must be a JSON array: `CORS_ORIGINS='["http://localhost:5173"]'`.
 |---|---|---|---|
 | `collection_interval_minutes` | `int` | `5` | `COLLECTION_INTERVAL_MINUTES` |
 | `historical_days` | `int` | `365` | `HISTORICAL_DAYS` |
-| `stooq_request_delay` | `float` | `2.0` | `STOOQ_REQUEST_DELAY` |
+| `sync_max_symbols` | `int` | `200` | `SYNC_MAX_SYMBOLS` |
 
 *Identity provider.*
 
@@ -149,6 +162,7 @@ must be a JSON array: `CORS_ORIGINS='["http://localhost:5173"]'`.
 | `keycloak_url` | `str` | `https://auth.example.com` | `KEYCLOAK_URL` |
 | `keycloak_realm` | `str` | `flowdesktop.local` | `KEYCLOAK_REALM` |
 | `keycloak_client_id` | `str` | `flowdesk-spa` | `KEYCLOAK_CLIENT_ID` |
+| `keycloak_client_secret` | `str` | `""` | `KEYCLOAK_CLIENT_SECRET` — the client secret, when your realm uses a confidential client. Blank for a public client with PKCE. |
 | `admin_role` | `str` | `fd-admin` | `ADMIN_ROLE` |
 | `keycloak_admin_client_id` | `str` | `flowdesk-backend` | `KEYCLOAK_ADMIN_CLIENT_ID` |
 | `keycloak_admin_client_secret` | `str` | `""` | `KEYCLOAK_ADMIN_CLIENT_SECRET` |
@@ -201,13 +215,20 @@ new model id.
 
 *Collection feature flags.*
 
-`filings_enabled` (`True`), `filings_max_symbols` (`200`),
+`filings_enabled` (`False`), `filings_max_symbols` (`200`),
 `filings_chunk_chars` (`1500`), `filings_max_chunks_per_doc` (`40`),
 `lazy_market_data_enabled` (`True`), `insider_enabled` (`True`),
-`insider_max_symbols` (`200`), `insider_max_filings_per_symbol` (`8`),
-`short_interest_enabled` (`True`), `short_interest_max_symbols` (`300`),
-`congress_trades_enabled` (`True`), `congress_lookback_days` (`400`),
-`congress_senate_url`, `congress_house_url`.
+`insider_max_symbols` (`200`), `short_interest_enabled` (`True`),
+`short_interest_max_symbols` (`300`), `congress_trades_enabled` (`True`),
+`congress_lookback_days` (`400`).
+
+> `filings_enabled` defaults to **False** because the whereq.cloud Data API
+> exposes SEC filing *metadata* by CIK, not the 10-K/10-Q narrative the
+> grounding index embeds, and it exposes no ticker→CIK mapping. The table, the
+> tool and the search surface are all still here — populate `company_filings`
+> yourself to turn the feature on. `insider_max_filings_per_symbol` was removed
+> with the EDGAR document parsing it bounded; the API returns the transaction
+> rows directly.
 
 *Simulator.*
 
@@ -283,12 +304,24 @@ protected route uses.
 ```python
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 
+def auth_configured() -> bool: ...
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> dict: ...
 
 async def verify_token(token: str) -> dict | None: ...
 ```
+
+**`auth_configured`.** True when the identity-provider settings are usable.
+False means the deployment still carries the shipped placeholders — the
+`keycloak_url` is one of `""`, `https://auth.example.com` or
+`http://auth.example.com` — so no token can be verified. The module defines
+`_NOT_CONFIGURED_DETAIL`, the message the 503 carries:
+
+> Authentication is not configured. Set KEYCLOAK_URL, KEYCLOAK_REALM and
+> KEYCLOAK_CLIENT_ID to your OpenID Connect provider before starting
+> FlowDesktop. See docs/setup.md.
 
 **Verification sequence.**
 
@@ -301,7 +334,8 @@ async def verify_token(token: str) -> dict | None: ...
 3. Fetch the JWKS. `_get_jwks()` requests
    `{keycloak_url}/realms/{keycloak_realm}/protocol/openid-connect/certs` with a
    10-second timeout. The cache refreshes at most once per hour
-   (`_JWKS_TTL = 3600`).
+   (`_JWKS_TTL = 3600`). If `auth_configured()` is false, the fetch is not even
+   attempted: the module logs the detail and raises a 503.
 4. Decode with `algorithms=["RS256"]`, verifying the issuer and the expiry.
    Audience verification is **disabled**: public-client access tokens do not
    always carry the client ID in `aud`, so the `azp` claim is used instead.
@@ -320,6 +354,7 @@ carries the tier roles; `preferred_username`, `email`, `given_name`,
 | Condition | Result |
 |---|---|
 | Missing `Authorization` header | 403 from `HTTPBearer` |
+| Identity provider not configured (shipped placeholders still in place) | 503 `"Authentication is not configured"` |
 | Expired token | 401 `"Token has expired"` |
 | Invalid signature / issuer / malformed | 401 `"Invalid token"` |
 | `azp` mismatch | 401 `"Invalid token"` |
@@ -585,7 +620,7 @@ name returns `{"error": f"Unknown tool: {fn_name}"}`.
 | 4 | `search_stocks` | `query` | `exchange` | `Stock` ILIKE match |
 | 5 | `get_watchlist` | — | — | `WatchlistItem` joined to `Stock`, owner-scoped |
 | 6 | `save_memory` | `key`, `value` | — | `INSERT … ON CONFLICT DO UPDATE` on `user_memories` |
-| 7 | `fetch_live_quote` | `symbol` | — | Live provider call, off the event loop |
+| 7 | `fetch_live_quote` | `symbol` | — | Live `GET /v1/equities/{symbol}/quote` on the Data API |
 | 8 | `get_technical_indicators` | `symbol` | — | 260 daily closes → SMA/EMA/RSI |
 | 9 | `get_fundamentals` | `symbol` | — | `fundamental_data` by XBRL concept |
 | 10 | `get_news_and_signals` | — | `symbol`, `sector`, `region`, `hours` (72), `limit` (10), `query` | `market_news_items` + `market_signals` |
@@ -618,8 +653,9 @@ name returns `{"error": f"Unknown tool: {fn_name}"}`.
 
 - `save_memory` truncates the key to 100 characters and the value to 200, and
   uses `ON CONFLICT DO UPDATE` against `uq_user_memory_key`.
-- `fetch_live_quote` runs the blocking provider call in an executor so it does
-  not stall the event loop.
+- `fetch_live_quote` goes straight to the Data API for a symbol that is not in
+  the local database yet, so it returns the same source the collector syncs
+  from. A missing key surfaces as an error string, not a crash.
 - `get_technical_indicators` requires at least 20 valid closes; fewer returns
   an explanatory error rather than a partial result.
 - `semantic_news_search` filters to `owner_id IS NULL` (global content only),
@@ -1033,10 +1069,9 @@ class FlowDesktopScheduler:
     async def _run(self, name: str, coro_factory) -> None: ...
     async def job_collect_quotes(self) -> None: ...
     async def job_collect_history(self) -> None: ...
-    async def job_collect_filings(self) -> None: ...
     async def job_collect_insider(self) -> None: ...
     async def job_collect_short_interest(self) -> None: ...
-    async def job_seed_universe(self) -> None: ...
+    async def job_sync_universe(self) -> None: ...
     def _register_collector_jobs(self) -> None: ...
     def _register_product_jobs(self) -> None: ...
     def start(self) -> None: ...
@@ -1054,6 +1089,21 @@ python -m flowdesk_collector.scheduler --product-only # product jobs only
 python -m worker.main                                 # product jobs, app runtime
 ```
 
+**Job catalogue.**
+
+| Job id | Trigger | Body |
+|---|---|---|
+| `sync_universe` | 00:01 daily | `sync_universe` + `seed_provider_status` |
+| `collect_quotes` | Every `collection_interval_minutes` (default 5) | `collect_quotes` |
+| `collect_history` | Every 4 hours | `collect_history` (capped at 200 symbols) |
+| `collect_insider` | 02:30 daily | `collect_insider_transactions` |
+| `collect_short_interest` | 03:00 daily | `collect_short_interest` |
+
+There is no `collect_filings` job: the whereq.cloud Data API exposes filing
+metadata by CIK, not the 10-K/10-Q narrative the grounding index needs (see
+[§12.2](#122-collectors)). The scheduler logs a note at registration time so
+the absence is not mistaken for a broken job.
+
 **Data flow.** `AsyncIOScheduler(timezone="UTC")`. Each job is registered with
 `replace_existing=True`. Every job body is wrapped by `_run`, which catches
 exceptions and logs them with a traceback — a failing job never kills the
@@ -1062,12 +1112,14 @@ scheduler.
 **Failure behaviour.**
 
 - `socket.setdefaulttimeout(int(os.getenv("COLLECTOR_SOCKET_TIMEOUT", "60")))`
-  bounds blocking sockets, so a wedged provider call cannot hang a worker
-  thread forever.
+  bounds blocking sockets, so a wedged API call cannot hang a worker thread
+  forever.
 - `SIGINT` and `SIGTERM` set a stop event; the scheduler is shut down in a
   `finally` block.
 - `collect_quotes` checks `any_market_open()` first and returns immediately
   when every market is closed.
+- A missing `WHEREQ_API_KEY` makes every job fail with an authentication
+  error. The job wrapper logs it and the next scheduled run still happens.
 
 ### 12.2 Collectors
 
@@ -1076,25 +1128,28 @@ scheduler.
 #### `universe.py`
 
 ```python
-DATA_DIR: Path
-UNIVERSE_CSV: Path
-_COLUMNS: tuple[str, ...]
+PAGE_SIZE = 1000
 
-def load_universe(path: Path | None = None) -> list[dict]: ...
-async def seed_universe(session, path: Path | None = None) -> dict: ...
+async def sync_universe(session, max_per_exchange: int | None = None) -> dict: ...
 async def active_symbols(session, limit: int | None = None) -> list[str]: ...
 ```
 
-The universe ships as `flowdesk_collector/data/universe.csv` — a CSV with the
-columns `symbol`, `name`, `name_cn`, `exchange`, `sector`, `industry`,
-`market_cap`, `market`, `currency`, `priority_tier`, `is_active`. It is a
-*starting point*, not gospel: edit it, or replace it with your own list, then
-re-run the collector.
+The instrument universe comes from the whereq.cloud Data API catalog. There is
+no bundled CSV.
 
-`seed_universe` inserts missing symbols and updates the descriptive fields
-(`name`, `name_cn`, `exchange`, `sector`, `industry`, `market_cap`) on existing
-ones. It **never resurrects an inactive symbol** — deactivation is a deliberate
-decision. It returns `{"inserted", "updated", "total"}`.
+`sync_universe` walks the catalog **exchange by exchange**. The order matters:
+the exchange list carries each exchange's market and currency, and the
+per-symbol listing does not, so a symbol-only walk would leave those columns
+empty. For each exchange it pages through `/v1/catalog/symbols` with
+`limit=PAGE_SIZE` and an increasing `offset`, and upserts every instrument into
+`stocks` — `name`, `name_cn`, `exchange`, `sector`, `market`, `currency` and
+`market_cap`.
+
+An instrument the catalog no longer lists is **soft-deleted**
+(`is_active = False`), never removed. An existing symbol that is already
+inactive is **not** resurrected: the sync updates the descriptive fields and
+leaves `is_active` alone. It returns
+`{"inserted", "updated", "deactivated", "total"}`.
 
 `active_symbols` returns the symbols where `is_active` is true, ordered by
 `priority_tier` then `symbol`.
@@ -1105,149 +1160,184 @@ decision. It returns `{"inserted", "updated", "total"}`.
 BATCH_SIZE = 50
 
 async def collect_quotes(session, symbols: list[str] | None = None) -> dict: ...
-def _quote_row(stock_id: int, q) -> Quote: ...
 ```
 
-Symbols are fetched in batches of 50 through `YahooFinanceProvider.get_quotes_batch`.
-Each result becomes a `Quote` row. The collector commits after each batch and
-sleeps 0.5 s between batches to stay inside Yahoo's rate limit. A failed batch
-is logged and the remaining batches continue; the symbols in it are counted as
-failed. Returns `{"fetched", "stored", "failed"}`.
+Symbols are fetched in batches of 50 through `WhereqCloudClient.quotes` — the
+API's own per-request cap — and each result is mapped by `quote_values` into a
+`Quote` row. The collector commits after each batch. A failed batch is logged
+and the remaining batches continue; the symbols in it are counted as failed.
+Returns `{"fetched", "stored", "failed"}`.
 
 The unique constraint `uq_quotes_stock_timestamp` on `(stock_id, timestamp)`
-makes a re-run within the same timestamp idempotent.
+makes a re-run within the same timestamp idempotent. The API keeps the same
+timestamp until a new quote lands, so the write path uses an upsert with a
+conflict guard rather than letting a batch abort on a duplicate.
 
 #### `history.py`
 
 ```python
 DEFAULT_LOOKBACK_DAYS = 365
 RECENCY_DAYS = 7
+MAX_BARS = 2000
 
 async def collect_history(session, symbols: list[str] | None = None,
                           lookback_days: int = DEFAULT_LOOKBACK_DAYS,
                           max_symbols: int | None = None) -> dict: ...
-def _history_row(stock_id: int, h) -> HistoricalPrice: ...
 ```
 
 **Data flow.** A symbol is skipped when it already has rows within the 7-day
 recency window. The remaining symbols are capped at `max_symbols` (200 from the
-scheduler). Each symbol is fetched for `lookback_days` (365 by default) and its
-rows are written, with a 0.3 s sleep between symbols. Returns
-`{"fetched", "stored", "skipped"}`.
+scheduler). Each symbol is fetched for `lookback_days` (365 by default) with
+`limit=MAX_BARS` — the API's own per-request cap — and its rows are written
+through `history_values`. Returns `{"fetched", "stored", "skipped"}`.
 
-The `adjustment` column records what the provider actually did to the prices,
-so two providers' series can be stitched without a fake jump.
+The `adjustment` column records the convention the source actually applied, so
+two series can be stitched without a fake jump.
 
 #### `altdata.py`
 
 ```python
-async def collect_filings(session, symbols=None, per_form: int = 1) -> dict: ...
-async def collect_insider_transactions(session, symbols=None) -> dict: ...
-async def collect_short_interest(session, symbols=None) -> dict: ...
-def _pdate(value) -> date | None: ...
-def sec_user_agent() -> str: ...
+async def collect_insider_transactions(session, symbols=None, days: int = 365,
+                                        max_symbols: int | None = None) -> dict: ...
+async def collect_short_interest(session, symbols=None,
+                                  max_symbols: int | None = None) -> dict: ...
 ```
 
-**`collect_filings`** resolves each symbol's CIK through `SecEdgarProvider`,
-fetches the latest 10-K/10-Q per form, and skips accessions already stored. The
-`content` column holds the filing's primary document text.
+**`collect_insider_transactions`** fetches the Form 4 rows for each symbol from
+`/v1/alt/insider/{symbol}` and writes one row per transaction through
+`insider_values`, deduped by `(accession, line_index)`. The API addresses
+insider activity by ticker and exposes no CIK, so `cik` is written as `None`.
 
-**`collect_insider_transactions`** fetches up to 4 recent Form 4 filings per
-symbol and writes one row per transaction line, deduped by
-`(accession, line_index)`. `value` is computed as `shares × price`.
+**`collect_short_interest`** writes one snapshot per `(symbol, settlement_date)`
+through `short_interest_values`. A row with no share count is skipped — the
+column is `NOT NULL` and a row without it says nothing.
 
-**`collect_short_interest`** writes one snapshot per `(symbol, settlement_date)`.
-A row with no share count is skipped — the column is `NOT NULL` and a row
-without it says nothing.
+Both cap the symbol list with `max_symbols` (`SYNC_MAX_SYMBOLS`, default 200),
+and each fetch failure is logged at debug level and skipped rather than
+aborting the run.
 
-All three sleep 0.3–0.4 s between symbols to respect the SEC's
-10-requests-per-second limit, and each fetch failure is logged at debug level
-and skipped rather than aborting the run.
+**What is not here.** There is no `collect_filings`. The whereq.cloud Data API
+exposes SEC filings by CIK and returns filing-level metadata — form, dates,
+accession, document URL — but not the 10-K/10-Q *narrative* that
+FlowDesktop's filing-grounding index embeds, and it exposes no ticker→CIK
+mapping. `company_filings` is therefore not populated out of the box; the
+table, the tool, the embedding chunker and the UI panel all still exist, and
+an operator can populate the table themselves. `FILINGS_ENABLED` defaults to
+`False`. The same applies to congressional trades: the API does not expose
+STOCK Act disclosures, so `congress_trades` stays empty.
 
-**`sec_user_agent()`** returns `os.getenv("SEC_USER_AGENT", "FlowDesktop
-flowdesktop@example.com")`. The SEC asks automated clients to identify
-themselves with a contact address, so set this to something like
-`Your Name you@example.com`.
-
-### 12.3 Providers
-
-`backend/packages/flowdesk-collector/flowdesk_collector/providers/`
-
-**`base.py`** — the abstract interface and the normalised types.
+#### `mapping.py`
 
 ```python
-ADJUSTMENT_SPLIT: str = "split_adjusted"
-ADJUSTMENT_SPLIT_DIVIDEND: str = "split_dividend_adjusted"
-ADJUSTMENT_NONE: str = "unadjusted"
-ADJUSTMENT_UNKNOWN: str = "unknown"
-ADJUSTMENT_VALUES: tuple[str, ...]
+PROVIDER = "whereq_cloud"
 
-class ProviderRateLimitedError(Exception): ...
+def to_decimal(value) -> Decimal | None: ...
+def to_int(value) -> int | None: ...
+def to_float(value) -> float | None: ...
+def to_date(value) -> date | None: ...
+def to_datetime(value) -> datetime | None: ...
 
-@dataclass
-class QuoteData: symbol, price, open_price, high, low, close, volume,
-                 change, change_percent, timestamp, provider
-@dataclass
-class HistoricalData: symbol, date, open_price, high, low, close, adj_close,
-                       volume, provider, adjustment
-@dataclass
-class StockInfo: symbol, name, exchange, sector, industry, market_cap
-@dataclass
-class FundamentalData: symbol, cik, concept, value, unit, period_start,
-                       period_end, form, fiscal_year, fiscal_quarter,
-                       provider, filed_date, accession
-@dataclass
-class MacroIndicator: series_id, series_name, value, date, unit, frequency, provider
-@dataclass
-class ChineseStockNameData: symbol, code, name_cn, exchange, provider
-
-class BaseProvider(ABC):
-    name: str = "base"
-    priority: int = 0
-    daily_limit: int | None = None
-    minute_limit: int | None = None
-    supports_batch: bool = False
-    supported_exchanges: list[str] = []
-    supports_realtime: bool = True
-    supports_historical: bool = True
-
-    @abstractmethod async def get_quote(self, symbol) -> QuoteData | None: ...
-    @abstractmethod async def get_quotes_batch(self, symbols) -> list[QuoteData]: ...
-    @abstractmethod async def get_historical(self, symbol, start_date, end_date) -> list[HistoricalData]: ...
-    @abstractmethod async def get_stock_info(self, symbol) -> StockInfo | None: ...
-    @abstractmethod async def search_stocks(self, query) -> list[StockInfo]: ...
-    async def is_available(self) -> bool: ...
-
-class EnrichmentProvider(ABC):
-    name: str = "enrichment_base"
-    supported_exchanges: list[str] = []
-
-class ChineseNameProvider(ABC):
-    @abstractmethod async def get_all_chinese_names(self) -> list[ChineseStockNameData]: ...
+def quote_values(q: dict) -> dict | None: ...
+def history_values(h: dict) -> dict | None: ...
+def short_interest_values(si: dict) -> dict | None: ...
+def insider_values(t: dict) -> dict | None: ...
 ```
 
-`QuoteData.__post_init__` defaults the timestamp to `datetime.utcnow()` and
-strips `tzinfo` from a timezone-aware value, because the DB columns are
-`TIMESTAMP WITHOUT TIME ZONE`.
+Pure functions only — no database, no network — so every mapping is unit
+testable on its own. The API and the ORM agree on most field names; the
+exceptions are handled here.
 
-**Provider inventory.**
+**Coercion rules.**
 
-| Module | Class | `name` | Priority | Role |
-|---|---|---|---|---|
-| `yahoo.py` | `YahooFinanceProvider` | `yahoo_finance` | 1 | Primary quotes and history |
-| `akshare.py` | `AKShareProvider` | `akshare` | 2 | China A-shares; also `ChineseNameProvider` |
-| `_yahoo_exchange_base.py` | `YahooExchangeProvider` | `jp_exchange` | 2 | Per-exchange Yahoo variant with a shared `YahooQuotaPool` |
-| `fmp.py` | `FMPProvider` | `fmp` | 4 | Key-based; quotes, history, earnings/dividend calendars |
-| `stooq.py` | `StooqProvider` | `stooq` | 8 | Historical-only backup |
-| `sec_edgar.py` | `SecEdgarProvider` | `sec_edgar` | — | `EnrichmentProvider`; CIK map, XBRL facts |
-| `sec_filings.py` | — | — | — | `fetch_latest_filings(cik, per_form=1)` |
-| `sec_insider.py` | — | — | — | `fetch_recent_form4(cik, max_filings=8)` |
-| `short_interest.py` | — | — | — | `fetch_short_interest(symbol) -> dict \| None` |
-| `congress_trades.py` | — | — | — | `fetch_congress_trades()`, `fetch_congress_fmp(api_key, max_pages=8)` |
+- `to_decimal` accepts a number or a numeric **string** and returns a
+  `Decimal`. The API sends decimals as strings (`"2399.0000"`), and the ORM
+  columns are `Numeric`, not `Float`. An unparseable value becomes `None`
+  rather than raising.
+- `to_int` and `to_float` accept the same string-or-number input.
+- `to_date` takes the first ten characters of an ISO date string, so a
+  full timestamp still yields its date.
+- `to_datetime` produces a **naive** `datetime`, because the columns are
+  `TIMESTAMP WITHOUT TIME ZONE`. The API emits naive local timestamps with no
+  zone suffix; a value that *does* carry one is converted to UTC and stripped,
+  so the column always holds UTC.
 
-`SecEdgarProvider` caches the CIK map per process — it is downloaded once and
-reused. A failed fetch returns `{}` and is logged as an error rather than
-raising.
+**Mapping rules.**
+
+| Function | Requires | Notable behaviour |
+|---|---|---|
+| `quote_values` | a `price`; returns `None` without one | A quote without a price says nothing. `timestamp` falls back to now. `provider` defaults to `whereq_cloud`. |
+| `history_values` | a `date`; returns `None` without one | Carries the API's `adjustment` label through, defaulting to `unknown`. |
+| `short_interest_values` | a share count **and** a settlement date; returns `None` without them | `short_interest` is `NOT NULL`, and a row without it says nothing. |
+| `insider_values` | an `accession` and an `insider_name`; returns `None` without them | The API's stable platform row `id` becomes `line_index` — that is what keeps `(accession, line_index)` unique and the re-sync idempotent. `cik` stays `None`, `value` comes from the API's `total_value`. |
+
+### 12.3 The whereq.cloud Data API client
+
+`backend/packages/flowdesk-core/flowdesk_core/whereq_cloud.py`
+
+The client lives in **flowdesk-core**, not in the collector, so the API and the
+collector share one implementation of the key handling.
+
+```python
+DEFAULT_BASE_URL = "https://api.whereq.cloud"
+DEFAULT_TIMEOUT = 30.0
+MAX_RETRIES = 3
+MAX_QUOTE_SYMBOLS = 50
+MAX_HISTORY_LIMIT = 2000
+MAX_CATALOG_LIMIT = 10000
+
+class WhereqCloudError(RuntimeError):
+    def __init__(self, message: str, status_code: int | None = None) -> None: ...
+
+class WhereqCloudAuthError(WhereqCloudError): ...
+
+class WhereqCloudClient:
+    def __init__(self, api_key=None, base_url=None, timeout=None,
+                 client: httpx.AsyncClient | None = None) -> None: ...
+    def require_key(self) -> str: ...
+    async def get(self, path: str, **params) -> dict: ...
+    async def stats(self) -> dict: ...
+    async def exchanges(self) -> list[dict]: ...
+    async def symbols_page(self, *, exchange=None, sector=None,
+                           limit=1000, offset=0) -> tuple[int, list[dict]]: ...
+    async def symbols(self, **params) -> list[dict]: ...
+    async def symbol(self, symbol: str) -> dict: ...
+    async def quote(self, symbol: str) -> dict | None: ...
+    async def quotes(self, symbols: list[str]) -> list[dict]: ...
+    async def history(self, symbol, start=None, end=None, limit=None) -> list[dict]: ...
+    async def short_interest(self, symbol: str) -> list[dict]: ...
+    async def insider_transactions(self, symbol, days=365, limit=100) -> list[dict]: ...
+    async def filings(self, cik, form=None, since=None, limit=50) -> list[dict]: ...
+    async def close(self) -> None: ...
+```
+
+**Authentication.** The key is sent in the `X-API-Key` header. `_headers()`
+raises `WhereqCloudAuthError` when no key is configured, and `get()` builds the
+header **per request** rather than only when the HTTP client is constructed —
+so the key is always sent, even when a client is injected from the outside.
+There is no anonymous path: a public endpoint on the API is still called with
+the key, because the key is what turns the data on.
+
+**Error handling.**
+
+| Condition | Result |
+|---|---|
+| No key configured | `WhereqCloudAuthError` before any request is made |
+| 401 or 403 | `WhereqCloudAuthError` with the status code |
+| 429 | `WhereqCloudError` after the retries are exhausted |
+| 5xx | `WhereqCloudError` after the retries are exhausted |
+| Other 4xx | `WhereqCloudError` immediately, carrying the status code and a truncated response body |
+| Transport error | `WhereqCloudError` after the retries are exhausted |
+| A non-JSON body | `WhereqCloudError` |
+
+**Retry policy.** Up to `MAX_RETRIES` (3) attempts on a 5xx, a 429 or a
+network error. A 429 honours the `Retry-After` header when it holds a number;
+otherwise the delay backs off linearly. The other cases sleep one second per
+attempt. A 4xx other than 429 is not retried — it will not get better.
+
+**Failure behaviour.** The client never falls back to another source and never
+returns an empty result in place of an error. The collectors decide what to do
+with a failure: each one logs it and continues with the next symbol or batch,
+so one bad symbol never aborts a run.
 
 ### 12.4 Market hours
 
@@ -1256,7 +1346,7 @@ raising.
 ```python
 _HOURS: dict[str, tuple[time, time]]        # 15 exchanges, UTC
 _LUNCH_BREAKS: dict[str, tuple[time, time]] # SSE, SZSE, HK
-_NORMALIZE: dict[str, str]                  # provider aliases → canonical
+_NORMALIZE: dict[str, str]                  # exchange aliases → canonical
 
 def normalize_exchange(exchange: str) -> str: ...
 def is_market_open(exchange: str, now: datetime | None = None) -> bool: ...
@@ -1277,21 +1367,27 @@ next).
 The module docstring says so explicitly and points at `exchange_calendars` or
 `pandas_market_calendars` for production-grade holiday handling.
 
-### 12.5 Provider registry
+### 12.5 Source registry
 
 `backend/packages/flowdesk-collector/flowdesk_collector/provider_registry.py`
 
 ```python
+SOURCE_NAME = "whereq_cloud"
 BUNDLED_PROVIDERS: list[dict]
 
+def api_key_configured() -> bool: ...
 async def list_providers(session) -> list[dict]: ...
 async def seed_provider_status(session) -> int: ...
 ```
 
-`seed_provider_status` inserts the four bundled keyless providers into
-`provider_status` if they are missing — idempotent, so it is safe to call on
-every collector start. `list_providers` reads the `provider_status` table and
-falls back to the static bundled list when the table has not been seeded yet.
+There is one source, so the registry holds one entry: the whereq.cloud Data
+API, marked `requires_key: True`. `api_key_configured()` reports whether
+`WHEREQ_API_KEY` is set, and that answer is what the status endpoint shows.
+
+`seed_provider_status` inserts the source into `provider_status` if it is
+missing — idempotent, so it is safe to call on every collector start.
+`list_providers` reads the `provider_status` table and falls back to the static
+bundled list when the table has not been seeded yet.
 
 ### 12.6 Pulse
 
@@ -1822,11 +1918,28 @@ produces useful diffs.
 
 ### `backend/alembic/versions/0001_initial_schema.py`
 
-**Responsibility.** The single initial revision. Creates all 51 tables, 78
+**Responsibility.** The initial revision. Creates all 51 tables, 78
 indexes, and the unique constraints, including the pgvector column
 `pgvector.sqlalchemy.vector.VECTOR(dim=384)`.
 
 `revision = "0001_initial_schema"`, `down_revision = None`.
+
+### `backend/alembic/versions/0002_insider_api_sync.py`
+
+**Responsibility.** Relaxes the two insider-transaction columns the Data API
+does not fill.
+
+`revision = "0002_insider_api_sync"`, `down_revision = "0001_initial_schema"`.
+
+- `insider_transactions.cik` becomes **nullable** — the API addresses insider
+  activity by ticker and exposes no CIK. The column is kept rather than
+  dropped, so rows parsed from a raw Form 4 document still fit.
+- `insider_transactions.line_index` becomes **bigint** — it carries the API's
+  stable platform row id, which is what keeps `(accession, line_index)` unique
+  and the sync idempotent.
+
+The downgrade deletes the CIK-less rows first: the `NOT NULL` constraint cannot
+be restored while such rows exist.
 
 ### 17.1 The workflow for contributors
 
@@ -1928,7 +2041,7 @@ Full index and constraint detail is in [database.md](database.md).
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `int` | PK |
-| `symbol` | `varchar(20)` | Unique, indexed. Yahoo Finance canonical format |
+| `symbol` | `varchar(20)` | Unique, indexed. The catalog's canonical ticker format |
 | `name` | `varchar(255)` | English name |
 | `name_cn` | `varchar(100)` | Chinese name, nullable |
 | `exchange` | `varchar(50)` | `NYQ`, `NMS`, `SHH`, … |
@@ -1973,7 +2086,9 @@ Unique: `uq_historical_stock_date (stock_id, date)`. Index:
 
 ### 19.2 Alternative data
 
-**`company_filings`** — one row per fetched 10-K/10-Q primary document.
+**`company_filings`** — one row per fetched 10-K/10-Q primary document. Not
+populated by the collector: the Data API exposes filing metadata by CIK, not
+the document narrative. Populate it yourself to turn the grounding feature on.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -1988,15 +2103,15 @@ Unique: `uq_historical_stock_date (stock_id, date)`. Index:
 | `url` | `text` | Nullable |
 | `content` | `text` | The document text — the source for the embedding index |
 
-**`insider_transactions`** — one row per SEC Form 4 transaction line.
+**`insider_transactions`** — one row per Form 4 transaction.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `bigint` | PK |
 | `symbol` | `varchar(20)` | Indexed |
-| `cik` | `bigint` | |
+| `cik` | `bigint` | Nullable — the Data API addresses insider activity by ticker and exposes no CIK |
 | `accession` | `varchar(30)` | With `line_index`, unique — `uq_insider_txn` |
-| `line_index` | `int` | The line within the filing |
+| `line_index` | `bigint` | The API's stable platform transaction id — the idempotency key with `accession` |
 | `filing_date`, `transaction_date` | `date` | Nullable |
 | `insider_name` | `varchar(150)` | `NOT NULL` |
 | `insider_title` | `varchar(120)` | Nullable |
@@ -2022,9 +2137,11 @@ Unique: `uq_historical_stock_date (stock_id, date)`. Index:
 | `short_pct_of_float` | `float` | Nullable, a fraction (0.0–1.0) |
 | `short_pct_of_outstanding` | `float` | Nullable |
 | `change_pct` | `float` | Nullable — month-over-month change |
-| `source` | `varchar(32)` | Default `Yahoo Finance` |
+| `source` | `varchar(32)` | The data source label — synced rows carry the label the Data API returns |
 
-**`congress_trades`** — one STOCK Act disclosure.
+**`congress_trades`** — one STOCK Act disclosure. Not populated by the
+collector: the Data API does not expose congressional disclosures. Populate it
+yourself to turn the panel on.
 
 | Column | Type | Notes |
 |---|---|---|

@@ -94,7 +94,7 @@ def setup_logging(
     root.addHandler(handler)
 
     # Suppress noisy third-party loggers
-    for name in ("urllib3", "aiohttp", "akshare", "httpx", "httpcore"):
+    for name in ("urllib3", "aiohttp", "httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 

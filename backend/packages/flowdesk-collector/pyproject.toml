@@ -1,7 +1,7 @@
 [project]
 name = "flowdesk-collector"
 version = "0.1.0"
-description = "Data collection for FlowDesktop — scheduled jobs plus the market-data access layer (providers, market hours)."
+description = "Data sync for FlowDesktop — scheduled jobs that pull market data from the whereq.cloud Data API."
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "FlowDesktop contributors" }]
@@ -10,17 +10,9 @@ dependencies = [
     "flowdesk-core",
     # Scheduling
     "apscheduler>=3.11.2",
-    # Data providers. Everything below works WITHOUT an API key.
-    "yfinance>=1.2.0",           # Yahoo Finance — quotes + history
-    "akshare>=1.14.0",           # AKShare — China A-shares
-    "requests>=2.32.3",
-    "aiohttp>=3.13.4",           # SEC EDGAR
-    "beautifulsoup4>=4.12.0",    # SEC filing HTML
-    "pandas>=2.0.0",
-    "numpy>=1.26.0",
-    # akshare runs some payloads through a V8 engine; two live contexts in one
-    # process abort the interpreter, so the package installs a JS-context guard.
-    "py-mini-racer>=0.6.0",
+    # The Data API client. The key itself is configured by the operator
+    # (WHEREQ_API_KEY) and is never bundled.
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +28,3 @@ build-backend = "setuptools.build_meta"
 # automatically.
 [tool.setuptools.packages.find]
 include = ["flowdesk_collector*"]
-
-# The bundled symbol universe must ship inside the installed package.
-[tool.setuptools.package-data]
-flowdesk_collector = ["data/*.csv"]

@@ -60,6 +60,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    # Configuration check. FlowDesktop needs two things to be useful: a
+    # whereq.cloud API key for the market data and a configured identity
+    # provider for the authentication. Neither is bundled, so say so loudly
+    # at boot instead of letting the first request fail obscurely.
+    _report_configuration()
+
     # Start pg_notify listener for real-time WebSocket notifications
     _pg_listener_task = asyncio.create_task(start_pg_listener(settings.database_url))
 
@@ -72,6 +78,25 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     logger.info("Shutting down FlowDesktop API...")
+
+
+def _report_configuration() -> None:
+    """Log what is and is not configured. Never raises — a missing key is a
+    setup problem the operator must fix, not a reason to refuse to boot."""
+    from flowdesk_core.auth import auth_configured
+
+    if not (settings.whereq_api_key or "").strip():
+        logger.warning(
+            "WHEREQ_API_KEY is not set. FlowDesktop reads all market data from "
+            "the whereq.cloud Data API and will not serve data without a key. "
+            "See docs/setup.md."
+        )
+    if not auth_configured():
+        logger.warning(
+            "KEYCLOAK_URL / KEYCLOAK_REALM / KEYCLOAK_CLIENT_ID are not "
+            "configured. Every authenticated route will answer 503 until they "
+            "point at your OpenID Connect provider. See docs/setup.md."
+        )
 
 
 app = FastAPI(

@@ -20,16 +20,16 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "service": "flowdesk-api",
+        "service": "flowdesktop-api",
     }
 
 
 @router.get("/providers/status", response_model=list[ProviderStatusResponse])
 async def get_provider_status(_: CurrentUser, db: AsyncSession = Depends(get_db)):
-    """Get status of all data providers.
+    """Get the status of this deployment's data source.
 
-    Returns:
-        List of provider statuses with usage info
+    FlowDesktop has a single source — the whereq.cloud Data API — so this
+    reports whether the API key is configured and the source is reachable.
     """
     statuses = await list_providers(db)
 

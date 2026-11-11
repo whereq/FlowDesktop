@@ -29,11 +29,12 @@ two required extensions.
 | Database | PostgreSQL 17 |
 | Tables | 51 |
 | Indexes | 78 explicit indexes, plus the unique constraints' implicit indexes |
-| Migrations | One revision: `0001_initial_schema` |
+| Migrations | Two revisions: `0001_initial_schema`, `0002_insider_api_sync` |
 | ORM | SQLAlchemy 2.0 declarative, in `flowdesk_core.models` |
 | Async driver | `asyncpg` |
 | Sync driver | `psycopg` (via `psycopg[binary]`), `psycopg2-binary` also shipped |
 | Extensions | `vector` (pgvector), `pg_trgm` |
+| Data source | The whereq.cloud Data API. Every market-data row is written by the collector through that API, and an API key (`WHEREQ_API_KEY`) is required for every request — there is no anonymous path. |
 
 ### 1.1 Table groups
 
@@ -118,7 +119,7 @@ a mixed-model state is detectable rather than silent.
 
 ## 3. How migrations work
 
-### 3.1 The single initial revision
+### 3.1 The initial revision
 
 `backend/alembic/versions/0001_initial_schema.py` — revision
 `0001_initial_schema`, `down_revision = None`. It creates all 51 tables, all
@@ -162,6 +163,27 @@ dropped columns.
 **not** call `Base.metadata.create_all()` — that races with Alembic and
 produces `DuplicateTable` errors. The docstring says so explicitly.
 
+### 3.6 The insider-sync revision
+
+`backend/alembic/versions/0002_insider_api_sync.py` — revision
+`0002_insider_api_sync`, `down_revision = "0001_initial_schema"`.
+
+FlowDesktop syncs insider Form 4 activity from the whereq.cloud Data API
+(`/v1/alt/insider/{symbol}`) instead of parsing SEC documents itself. The API
+addresses insider activity by ticker and returns a stable platform row id, but
+it exposes no CIK. So the revision relaxes two columns:
+
+| Change | From | To | Why |
+|---|---|---|---|
+| `insider_transactions.cik` | `bigint NOT NULL` | `bigint NULL` | A synced row has no CIK — the API addresses the activity by ticker. |
+| `insider_transactions.line_index` | `integer` | `bigint` | It carries the API's stable platform row id, which is what keeps `(accession, line_index)` unique and the sync idempotent. |
+
+The `cik` column is **kept**, not dropped, so rows parsed from a raw Form 4
+document still fit. The downgrade deletes the CIK-less rows first, because the
+`NOT NULL` constraint cannot be restored while such rows exist.
+
+No table is dropped: the database still has 51 tables.
+
 ---
 
 ## 4. Domain: universe and prices
@@ -174,7 +196,7 @@ or carries the symbol as a denormalised text column.
 | Column | Type | Null | Notes |
 |---|---|---|---|
 | `id` | `integer` | no | PK, autoincrement |
-| `symbol` | `varchar(20)` | no | **Unique**, indexed. Yahoo Finance canonical format (`AAPL`, `600519.SS`) |
+| `symbol` | `varchar(20)` | no | **Unique**, indexed. The catalog's canonical ticker format (`AAPL`, `600519.SS`) |
 | `name` | `varchar(255)` | no | English name |
 | `name_cn` | `varchar(100)` | yes | Chinese name |
 | `exchange` | `varchar(50)` | yes | `NYQ`, `NMS`, `SHH`, `SHZ`, `TOR`, … |
@@ -213,7 +235,7 @@ stops trading still has a visible price history.
 | `volume` | `bigint` | yes | |
 | `change` | `numeric(12,4)` | yes | Absolute change |
 | `change_percent` | `numeric(8,4)` | yes | Percentage change |
-| `provider` | `varchar(50)` | yes | Usually `yahoo` |
+| `provider` | `varchar(50)` | yes | The source label — synced rows carry the label the Data API returns, `whereq_cloud` by default |
 | `timestamp` | `datetime` | no | The quote's own time, not the insert time |
 | `created_at` | `datetime` | no | |
 
@@ -249,11 +271,12 @@ The daily OHLCV series.
 - `idx_historical_stock_date` on `(stock_id, date)` — the chart and indicator
   query.
 
-**The `adjustment` column.** Providers disagree about what a "close" means:
+**The `adjustment` column.** Sources disagree about what a "close" means:
 some return the raw traded price, some adjust for splits, some for splits and
-dividends. Stitching two providers' series without recording the convention
-produces a chart with a fake jump in it. The per-provider basis is documented
-in `flowdesk_collector/providers/base.py`.
+dividends. Stitching two series together without recording the convention
+produces a chart with a fake jump in it. The value is taken from the Data
+API's own `adjustment` field, and `collectors/mapping.py` defaults it to
+`unknown` when the API does not send one.
 
 ---
 
@@ -262,6 +285,14 @@ in `flowdesk_collector/providers/base.py`.
 ### 5.1 `company_filings`
 
 One row per fetched SEC 10-K / 10-Q primary document.
+
+**Not populated by the collector.** The whereq.cloud Data API exposes SEC
+filing *metadata* — form, dates, accession, document URL — and it addresses
+filings by CIK, not by ticker. It does not expose a ticker→CIK mapping and it
+does not return the 10-K/10-Q narrative that the grounding index embeds. The
+table, the `search_filings` tool, the embedding chunker and the UI panel all
+still exist; populate the table yourself to turn the feature on.
+`FILINGS_ENABLED` defaults to `False`.
 
 | Column | Type | Null | Notes |
 |---|---|---|---|
@@ -279,23 +310,22 @@ One row per fetched SEC 10-K / 10-Q primary document.
 
 **Constraints and indexes.**
 - `uq_filing_accession` on `accession` — **unique**. The accession number is
-  globally unique per SEC, which is what makes the collector's dedup set
-  correct.
+  globally unique per SEC, which is what makes a dedup set correct.
 - `ix_company_filings_symbol` on `symbol`.
 - `idx_filing_symbol_form` on `(symbol, form)` — the "latest 10-K for this
   symbol" query.
 
 ### 5.2 `insider_transactions`
 
-One row per SEC Form 4 non-derivative transaction line.
+One row per Form 4 transaction.
 
 | Column | Type | Null | Notes |
 |---|---|---|---|
 | `id` | `bigint` | no | PK, autoincrement |
 | `symbol` | `varchar(20)` | no | Indexed |
-| `cik` | `bigint` | no | |
+| `cik` | `bigint` | yes | **Nullable.** The whereq.cloud Data API addresses insider activity by ticker and exposes no CIK, so a synced row has no CIK. Kept (not dropped) so rows parsed from a raw Form 4 document still fit. |
 | `accession` | `varchar(30)` | no | The Form 4 accession |
-| `line_index` | `integer` | no | The line within the filing |
+| `line_index` | `bigint` | no | The API's stable platform transaction id. With `accession` it is the idempotency key: the same transaction always maps to the same row, so a re-sync updates nothing. |
 | `filing_date` | `date` | yes | |
 | `transaction_date` | `date` | yes | |
 | `insider_name` | `varchar(150)` | no | |
@@ -307,12 +337,12 @@ One row per SEC Form 4 non-derivative transaction line.
 | `acquired_disposed` | `varchar(1)` | yes | `A` or `D` |
 | `shares` | `numeric(18,4)` | yes | |
 | `price` | `numeric(14,4)` | yes | |
-| `value` | `numeric(20,2)` | yes | `shares × price` |
+| `value` | `numeric(20,2)` | yes | The transaction's total value |
 | `shares_owned_after` | `numeric(18,4)` | yes | |
 
 **Constraints and indexes.**
 - `uq_insider_txn` on `(accession, line_index)` — **unique**. One row per
-  transaction line.
+  transaction.
 - `ix_insider_transactions_symbol` on `symbol`.
 - `ix_insider_transactions_symbol_date` on `(symbol, transaction_date)`.
 
@@ -336,7 +366,7 @@ One snapshot per symbol per settlement date.
 | `short_pct_of_float` | `float` | yes | A **fraction**, 0.0–1.0. The API multiplies by 100 for display |
 | `short_pct_of_outstanding` | `float` | yes | |
 | `change_pct` | `float` | yes | Month-over-month change |
-| `source` | `varchar(32)` | no | Default `Yahoo Finance` |
+| `source` | `varchar(32)` | no | The data source label. Synced rows carry the label the Data API returns; the column default is `Yahoo Finance`, a leftover from the removed Yahoo-backed collector. |
 | `created_at` | `datetime` | no | Server default `now()` |
 
 **Constraints and indexes.**
@@ -344,16 +374,19 @@ One snapshot per symbol per settlement date.
 - `ix_short_interest_symbol` on `symbol`.
 
 > The column names are FINRA-shaped (`settlement_date`, `short_interest`,
-  `days_to_cover`). The provider returns Yahoo-shaped keys
-  (`as_of_date`, `shares_short`, `short_ratio`), so a mapping layer converts
-  between them — `_short_interest_row` in
-  `api/services/lazy_market_data.py` and `_short_interest_payload` in
-  `api/services/tool_registry.py`. Both are pure functions, so the mapping is
-  unit-tested independently of the database.
+  `days_to_cover`). The whereq.cloud Data API uses the same names, so the
+  mapping is a straight coercion — `short_interest_values` in
+  `flowdesk_collector/collectors/mapping.py` on the write side, and
+  `_short_interest_payload` in `api/services/tool_registry.py` on the read
+  side. Both are pure functions, so the mapping is unit-tested independently
+  of the database.
 
 ### 5.4 `congress_trades`
 
-One US congressional stock transaction (STOCK Act disclosure).
+One US congressional stock transaction (STOCK Act disclosure). **Not populated
+by the collector**: the whereq.cloud Data API does not expose congressional
+(STOCK Act) disclosures. The table, the `get_congress_trades` tool and the UI
+panel all remain — populate the table yourself to turn the panel on.
 
 | Column | Type | Null | Notes |
 |---|---|---|---|
@@ -393,7 +426,7 @@ One XBRL fact per filing.
 | `form` | `varchar(20)` | yes | `10-K` / `10-Q` |
 | `fiscal_year` | `integer` | yes | |
 | `fiscal_quarter` | `integer` | yes | |
-| `provider` | `varchar(20)` | no | `sec_edgar` |
+| `provider` | `varchar(20)` | no | The source of the XBRL fact. The column still defaults to `sec_edgar`, the label from the removed document-parsing collectors; nothing writes it now. |
 | `filed_date` | `date` | yes | When the fact became public — the point-in-time anchor |
 | `accession` | `varchar(24)` | yes | The source filing's accession |
 | `created_at` | `datetime` | no | |
@@ -461,8 +494,7 @@ discriminated by `kind`, so the calendar feed is a single query.
 
 ### 5.8 `chinese_stock_names`
 
-The Chinese name registry, kept separate from `stocks.name_cn` because it is
-populated by a bulk provider sync rather than by the universe seeder.
+The Chinese name registry, kept separate from `stocks.name_cn`.
 
 | Column | Type | Null | Notes |
 |---|---|---|---|
@@ -1408,7 +1440,7 @@ The translation cache.
 | `uq_quotes_stock_timestamp` | `quotes` | `(stock_id, timestamp)` | One quote per symbol per instant |
 | `uq_historical_stock_date` | `historical_prices` | `(stock_id, date)` | One bar per symbol per day |
 | `uq_filing_accession` | `company_filings` | `(accession)` | The globally unique SEC accession |
-| `uq_insider_txn` | `insider_transactions` | `(accession, line_index)` | One row per Form 4 transaction line |
+| `uq_insider_txn` | `insider_transactions` | `(accession, line_index)` | One row per Form 4 transaction — `line_index` carries the API's stable transaction id |
 | `uq_short_interest_symbol_date` | `short_interest` | `(symbol, settlement_date)` | One snapshot per settlement date |
 | `uq_congress_trade_hash` | `congress_trades` | `(dedup_hash)` | The disclosure feed's repeated records |
 | `uq_fundamental_symbol_concept_period_form` | `fundamental_data` | `(symbol, concept, period_end, form)` | One fact per concept per period per form |
@@ -1509,13 +1541,16 @@ them out.
 
 Two paths, and both are deliberate:
 
-1. **The universe seeder.** It updates the descriptive fields of an existing
+1. **The universe sync.** `sync_universe` walks the whereq.cloud catalog and
+   upserts every instrument. It updates the descriptive fields of an existing
    symbol but **never resurrects an inactive one** — the `is_active` flag is
    not in the list of fields it updates. Deactivating a symbol is a deliberate
-   act: edit `universe.csv`, set `is_active` to `f`, and re-run the seeder.
-2. **The symbol set itself.** A symbol absent from the CSV is never
-   deactivated by the seeder — it is simply left alone. The CSV is a starting
-   point, and the seeder only adds and updates.
+   act: the universe is synced from the Data API catalog, so to deactivate one
+   set `is_active = false` on its `stocks` row.
+2. **The catalog itself.** An instrument the catalog no longer lists is
+   soft-deleted by the next sync — it is marked `is_active = False` and its
+   row stays. A symbol the catalog still lists is never deactivated by the
+   sync; it is simply left alone.
 
 ### 12.4 The related soft states
 

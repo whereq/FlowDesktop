@@ -140,8 +140,8 @@ class Dataset(Base):
     warn_hours: Mapped[int | None] = mapped_column(
         Integer
     )  # /v1/status: operational within this age
-    # The upstream feed(s) that PRODUCE this dataset ("Yahoo Finance",
-    # "SEC EDGAR · FINRA"). Curated — the collector knows it in code, the
+    # The upstream feed(s) that PRODUCE this dataset (e.g. the market data
+    # API). Curated — the collector knows it in code, the
     # status page shows it to admins. NULL = a static registry with no
     # upstream (crops, manufacturers). NOT served by the public dataset
     # endpoints; it is admin-only on /v1/status/collections.

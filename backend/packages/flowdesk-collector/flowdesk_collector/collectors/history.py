@@ -1,6 +1,7 @@
-"""Collect daily OHLCV history for the symbols that need it.
+"""Sync daily OHLCV history for the symbols that need it.
 
-Source: Yahoo Finance (no API key required).
+Source: the whereq.cloud Data API (``/v1/equities/{symbol}/history``),
+fetched with the operator's API key.
 
 History is backfilled incrementally: a symbol is skipped when it already has
 rows inside the recency window. The unique constraint on
@@ -9,7 +10,6 @@ rows inside the recency window. The unique constraint on
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import date, timedelta
 
@@ -20,6 +20,9 @@ DEFAULT_LOOKBACK_DAYS = 365
 
 #: A symbol with data this recent is considered up to date.
 RECENCY_DAYS = 7
+
+#: The Data API returns at most 2000 daily bars per request.
+MAX_BARS = 2000
 
 
 async def collect_history(
@@ -33,11 +36,13 @@ async def collect_history(
     Returns ``{"fetched": n, "stored": m, "skipped": k}``.
     """
     from sqlalchemy import select
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+    from flowdesk_collector.collectors.mapping import history_values
     from flowdesk_collector.collectors.universe import active_symbols
-    from flowdesk_collector.providers.yahoo import YahooFinanceProvider
     from flowdesk_core.models.historical import HistoricalPrice
     from flowdesk_core.models.stock import Stock
+    from flowdesk_core.whereq_cloud import WhereqCloudClient
 
     if symbols is None:
         symbols = await active_symbols(session)
@@ -72,45 +77,33 @@ async def collect_history(
     )
     stock_ids = {sym: sid for sid, sym in stock_rows}
 
-    provider = YahooFinanceProvider()
     end = date.today()
     start = end - timedelta(days=lookback_days)
     stored = 0
 
-    for sym in todo:
-        sid = stock_ids.get(sym)
-        if sid is None:
-            continue
-        try:
-            rows = await provider.get_historical(sym, start, end)
-        except Exception:
-            logger.debug("History fetch failed for %s", sym, exc_info=True)
-            continue
-        if not rows:
-            continue
-        for h in rows:
-            session.add(_history_row(sid, h))
-            stored += 1
-        await session.commit()
-        await asyncio.sleep(0.3)
+    async with WhereqCloudClient() as client:
+        for sym in todo:
+            sid = stock_ids.get(sym)
+            if sid is None:
+                continue
+            try:
+                rows = await client.history(sym, start=start, end=end, limit=MAX_BARS)
+            except Exception:
+                logger.debug("History fetch failed for %s", sym, exc_info=True)
+                continue
+            if not rows:
+                continue
+            for h in rows:
+                values = history_values(h)
+                if values is None:
+                    continue
+                await session.execute(
+                    pg_insert(HistoricalPrice)
+                    .values(stock_id=sid, **values)
+                    .on_conflict_do_nothing(constraint="uq_historical_stock_date")
+                )
+                stored += 1
+            await session.commit()
 
-    logger.info("History collected: %d rows for %d symbols", stored, len(todo))
+    logger.info("History synced: %d rows for %d symbols", stored, len(todo))
     return {"fetched": len(todo), "stored": stored, "skipped": len(fresh)}
-
-
-def _history_row(stock_id: int, h):
-    """Map a provider history row onto a ``HistoricalPrice`` ORM row."""
-    from flowdesk_core.models.historical import HistoricalPrice
-
-    return HistoricalPrice(
-        stock_id=stock_id,
-        date=h.date,
-        open_price=h.open_price,
-        high=h.high,
-        low=h.low,
-        close=h.close,
-        adj_close=h.adj_close,
-        volume=h.volume,
-        provider=h.provider or "yahoo",
-        adjustment=h.adjustment or "unknown",
-    )

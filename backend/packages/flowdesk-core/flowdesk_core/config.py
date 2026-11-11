@@ -16,32 +16,26 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # ── Database ──────────────────────────────────────────────────────────
-    database_url: str = "postgresql+asyncpg://flowdesk:flowdesk@localhost:5432/flowdesk"
-    database_url_sync: str = "postgresql://flowdesk:flowdesk@localhost:5432/flowdesk"
+    database_url: str = "postgresql+asyncpg://flowdesktop:flowdesktop@localhost:5432/flowdesktop"
+    database_url_sync: str = "postgresql://flowdesktop:flowdesktop@localhost:5432/flowdesktop"
 
-    # ── Data providers (all optional) ────────────────────────────────────
-    # The bundled providers (Yahoo Finance, Stooq, AKShare, SEC EDGAR) need
-    # no key at all. These keys are only for the optional extra providers you
-    # can plug in — see docs/design-high-level-design.md.
-    alpha_vantage_api_key: str = ""
-    finnhub_api_key: str = ""
-    twelve_data_api_key: str = ""
-    polygon_api_key: str = ""
-    tiingo_api_key: str = ""
-    alpaca_api_key: str = ""
-    alpaca_api_secret: str = ""
-    fmp_api_key: str = ""
-    fred_api_key: str = ""
-    tushare_token: str = ""
-    jquants_api_key: str = ""
-    jquants_email: str = ""
-    jquants_password: str = ""
-    jquants_refresh_token: str = ""
+    # ── whereq.cloud Data API ─────────────────────────────────────────────
+    # FlowDesktop is a client of the whereq.cloud data cloud. Every piece of
+    # market data comes from the Data API, and every call is made with this
+    # key — there is no anonymous path and no bundled scraper.
+    #
+    # Get a key from your whereq.cloud dashboard. The `filings` scope is
+    # required for the SEC endpoints; the news and analyst endpoints are
+    # metered too.
+    whereq_api_key: str = ""
+    # Override only for a self-hosted or regional deployment.
+    whereq_api_url: str = "https://api.whereq.cloud"
+    # Per-request timeout for Data API calls, in seconds.
+    whereq_api_timeout: float = 30.0
 
     # ── Collection settings ───────────────────────────────────────────────
     collection_interval_minutes: int = 5
     historical_days: int = 365
-    stooq_request_delay: float = 2.0
 
     # ── Authentication (OIDC) ─────────────────────────────────────────────
     # A generic OpenID Connect provider. The SPA is a public client; the
@@ -49,6 +43,9 @@ class Settings(BaseSettings):
     keycloak_url: str = "https://auth.example.com"
     keycloak_realm: str = "flowdesktop"
     keycloak_client_id: str = "flowdesktop-spa"
+    # Client secret, when your realm uses a confidential client. Leave blank
+    # for a public client with PKCE.
+    keycloak_client_secret: str = ""
     # Realm role required for admin-only surfaces.
     admin_role: str = "fd-admin"
 
@@ -122,8 +119,13 @@ class Settings(BaseSettings):
 
     # ── Filings grounding ─────────────────────────────────────────────────
     # SEC 10-K/10-Q narrative indexed into pgvector for semantic search.
-    # Free/no-key (SEC EDGAR). Scoped to held (watchlist + portfolio) symbols.
-    filings_enabled: bool = True
+    #
+    # OFF by default: the whereq.cloud Data API exposes SEC filing
+    # *metadata* (form, dates, accession, document URL) but not the document
+    # narrative, and it addresses filings by CIK rather than by ticker. The
+    # table, the tool and the search surface are all still here — populate
+    # `company_filings` yourself to turn the feature on.
+    filings_enabled: bool = False
     filings_max_symbols: int = 200  # cap symbols processed per collect run
     filings_chunk_chars: int = 1500  # chars per embedded chunk
     filings_max_chunks_per_doc: int = 40  # cap embedded chunks per filing
@@ -134,24 +136,23 @@ class Settings(BaseSettings):
     lazy_market_data_enabled: bool = True
 
     # ── Insider activity ──────────────────────────────────────────────────
-    # SEC Form 4 transactions for held US symbols. Free/no-key.
+    # SEC Form 4 transactions for held US symbols, synced from the Data API.
     insider_enabled: bool = True
     insider_max_symbols: int = 200  # cap symbols processed per collect run
-    insider_max_filings_per_symbol: int = 8  # recent Form 4 filings parsed per symbol
 
     # ── Short interest ────────────────────────────────────────────────────
-    # Yahoo Finance snapshots for held symbols. Free/no-key.
+    # Short-interest snapshots for held symbols, synced from the Data API.
     short_interest_enabled: bool = True
     short_interest_max_symbols: int = 300  # cap symbols processed per collect run
+    # Symbols synced from the API per quote/history run.
+    sync_max_symbols: int = 200
 
     # ── Congressional trades ───────────────────────────────────────────────
-    # Community STOCK Act datasets, filtered to the symbol universe.
+    # The whereq.cloud Data API does not expose congressional (STOCK Act)
+    # disclosures, so this surface stays empty unless you populate the table
+    # yourself.
     congress_trades_enabled: bool = True
     congress_lookback_days: int = 400  # only keep disclosures within this window
-    congress_senate_url: str = "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json"
-    congress_house_url: str = (
-        "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json"
-    )
 
     # ── Trading simulator (paper trading) ─────────────────────────────────
     # Money knobs are Decimal; friction is off by default (a clean learning

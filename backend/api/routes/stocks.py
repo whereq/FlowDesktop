@@ -11,7 +11,7 @@ from flowdesk_core.models import Quote, Stock
 
 router = APIRouter(prefix="/stocks", tags=["stocks"])
 
-# Maps variant exchange codes (from Yahoo, TuShare, etc.) to canonical codes
+# Maps variant exchange codes to the canonical codes
 # used throughout the app and i18n keys.
 _EXCHANGE_CANONICAL: dict[str, str] = {
     # Chinese exchanges

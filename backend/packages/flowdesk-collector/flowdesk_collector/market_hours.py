@@ -103,8 +103,8 @@ _HOURS: dict[str, tuple[time, time]] = {
 }
 
 # Mid-session lunch breaks (UTC).  is_market_open() returns False during these
-# windows even if the time falls within _HOURS.  Avoids hammering providers
-# (AKShare, HKEX) when their data feed is inactive during the break.
+# windows even if the time falls within _HOURS.  Avoids pulling quotes for an
+# exchange whose market is on a break.
 _LUNCH_BREAKS: dict[str, tuple[time, time]] = {
     # SSE/SZSE: 11:30–13:00 CST = 03:30–05:00 UTC
     "SSE": (time(3, 30), time(5, 0)),
@@ -113,10 +113,10 @@ _LUNCH_BREAKS: dict[str, tuple[time, time]] = {
     "HK": (time(4, 0), time(5, 0)),
 }
 
-# Map non-canonical exchange codes used internally (e.g. Yahoo Finance values)
+# Map non-canonical exchange codes (as they appear in some data feeds)
 # to the canonical codes above.
 _NORMALIZE: dict[str, str] = {
-    # NYSE variants from Yahoo Finance / Alpha Vantage
+    # NYSE variants seen in market data feeds
     "NYQ": "NYSE",
     "NMS": "NASDAQ",  # NASDAQ Global Select
     "NGM": "NASDAQ",  # NASDAQ Global Market
@@ -149,22 +149,22 @@ _NORMALIZE: dict[str, str] = {
     "Korea": "KSC",
     # India — NSE and BSE share the same 09:15–15:30 IST session
     "NSE": "NSE",
-    "NSI": "NSE",  # Yahoo Finance's code for the National Stock Exchange
+    "NSI": "NSE",  # alternative code for the National Stock Exchange
     "BSE": "NSE",  # Bombay Stock Exchange — identical hours
     # United Kingdom
     "LSE": "LSE",
-    "LON": "LSE",  # Yahoo Finance's code for the London Stock Exchange
+    "LON": "LSE",  # alternative code for the London Stock Exchange
     # Germany — XETRA (Frankfurt) is the cash-market reference
     "XETRA": "XETRA",
-    "GER": "XETRA",  # Yahoo Finance's code for Germany
-    "FRA": "XETRA",  # Yahoo Finance's code for Frankfurt
+    "GER": "XETRA",  # alternative code for Germany
+    "FRA": "XETRA",  # alternative code for Frankfurt
     # Brazil
     "B3": "B3",
-    "SAO": "B3",  # Yahoo Finance's code for São Paulo
+    "SAO": "B3",  # alternative code for São Paulo
     "BVMF": "B3",  # B3's legacy identifier
     # Australia
     "ASX": "ASX",
-    "AX": "ASX",  # Yahoo Finance's code for Australia
+    "AX": "ASX",  # alternative code for Australia
 }
 
 
@@ -178,7 +178,7 @@ def is_market_open(exchange: str, now: datetime | None = None) -> bool:
 
     Args:
         exchange: Exchange code (case-insensitive). Accepts both canonical
-                  codes (NYSE, NASDAQ, TSX, SSE, SZSE) and Yahoo Finance
+                  codes (NYSE, NASDAQ, TSX, SSE, SZSE) and the common
                   variants (NYQ, NMS, NGM, etc.).
         now:      Reference UTC datetime. Defaults to ``datetime.now(UTC)``.
 

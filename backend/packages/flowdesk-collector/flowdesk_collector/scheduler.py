@@ -2,17 +2,18 @@
 
 Two roles, one scheduler:
 
-**Collector mode** (the default) runs the data-collection jobs — quotes,
-history, SEC filings, insider Form 4, short interest — plus the product jobs.
-This is what a self-hosted user runs.
+**Collector mode** (the default) runs the data-sync jobs — the instrument
+universe, quotes, history, short interest and insider activity — plus the
+product jobs. Every one of them reads from the whereq.cloud Data API with
+your API key. This is what a self-hosted user runs.
 
 **Product-only mode** runs just the product jobs (scheduled agents, the
-simulator matcher, daily equity snapshots). Use this when the data collection
-is hosted elsewhere and only the application-side work should run here.
+simulator matcher, daily equity snapshots). Use this when the data sync is
+hosted elsewhere and only the application-side work should run here.
 
 Run it with::
 
-    python -m flowdesk_collector.scheduler            # collector + product jobs
+    python -m flowdesk_collector.scheduler            # sync + product jobs
     python -m flowdesk_collector.scheduler --product-only
 """
 
@@ -78,30 +79,24 @@ class FlowDesktopScheduler:
         async with AsyncSessionLocal() as session:
             await collect_history(session, max_symbols=200)
 
-    async def job_collect_filings(self) -> None:
-        from flowdesk_collector.collectors.altdata import collect_filings
-
-        async with AsyncSessionLocal() as session:
-            await collect_filings(session)
-
     async def job_collect_insider(self) -> None:
         from flowdesk_collector.collectors.altdata import collect_insider_transactions
 
         async with AsyncSessionLocal() as session:
-            await collect_insider_transactions(session)
+            await collect_insider_transactions(session, max_symbols=self.settings.sync_max_symbols)
 
     async def job_collect_short_interest(self) -> None:
         from flowdesk_collector.collectors.altdata import collect_short_interest
 
         async with AsyncSessionLocal() as session:
-            await collect_short_interest(session)
+            await collect_short_interest(session, max_symbols=self.settings.sync_max_symbols)
 
-    async def job_seed_universe(self) -> None:
-        from flowdesk_collector.collectors.universe import seed_universe
+    async def job_sync_universe(self) -> None:
+        from flowdesk_collector.collectors.universe import sync_universe
         from flowdesk_collector.provider_registry import seed_provider_status
 
         async with AsyncSessionLocal() as session:
-            await seed_universe(session)
+            await sync_universe(session)
             await seed_provider_status(session)
 
     # ------------------------------------------------------------------
@@ -114,10 +109,10 @@ class FlowDesktopScheduler:
 
         # Daily UTC plan
         add(
-            self._run("seed_universe", self.job_seed_universe),
+            self._run("sync_universe", self.job_sync_universe),
             trigger=CronTrigger(hour=0, minute=1),
-            id="seed_universe",
-            name="Seed the symbol universe and provider registry",
+            id="sync_universe",
+            name="Sync the instrument universe from the whereq.cloud Data API",
             replace_existing=True,
         )
 
@@ -139,20 +134,12 @@ class FlowDesktopScheduler:
             replace_existing=True,
         )
 
-        # Alternative data — SEC is rate-limited, so these run a few times a day
-        add(
-            self._run("collect_filings", self.job_collect_filings),
-            trigger=CronTrigger(hour=2, minute=0),
-            id="collect_filings",
-            name="Collect SEC filings (10-K/10-Q)",
-            replace_existing=True,
-        )
-
+        # Alternative data — the Data API is metered, so these run a few times a day
         add(
             self._run("collect_insider", self.job_collect_insider),
             trigger=CronTrigger(hour=2, minute=30),
             id="collect_insider",
-            name="Collect insider Form 4 transactions",
+            name="Sync insider Form 4 transactions",
             replace_existing=True,
         )
 
@@ -160,8 +147,14 @@ class FlowDesktopScheduler:
             self._run("collect_short_interest", self.job_collect_short_interest),
             trigger=CronTrigger(hour=3, minute=0),
             id="collect_short_interest",
-            name="Collect short-interest snapshots",
+            name="Sync short-interest snapshots",
             replace_existing=True,
+        )
+
+        logger.info(
+            "Filing-narrative grounding is not synced: the whereq.cloud Data API "
+            "exposes filing metadata by CIK, not the 10-K/10-Q text the grounding "
+            "index needs. See docs/data-sources.md."
         )
 
     def _register_product_jobs(self) -> None:

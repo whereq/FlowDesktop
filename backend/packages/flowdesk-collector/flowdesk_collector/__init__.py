@@ -1,12 +1,10 @@
 """Data collection service.
 
-Importing the package installs the JavaScript-context guard: akshare runs
-some payloads through py_mini_racer (V8), and V8 cannot survive two live
-contexts in one process. The collector fetches in worker threads, so without
-the guard the historical backfill aborts the whole collector with SIGSEGV.
-See `collector.js_guard` for the details.
+FlowDesktop does not scrape market data. The collector is a **sync client**:
+it pulls the symbol universe, quotes, daily history, short interest and
+insider transactions from the whereq.cloud Data API with the operator's API
+key, and writes them into the local database so the app and NOVA's tools
+read from a local, fast store.
+
+Everything the collector needs is in :mod:`flowdesk_core.whereq_cloud`.
 """
-
-from flowdesk_collector.js_guard import install as _install_js_guard
-
-_install_js_guard()

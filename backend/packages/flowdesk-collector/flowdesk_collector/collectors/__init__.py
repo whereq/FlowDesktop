@@ -1,11 +1,13 @@
 """Data collectors — the jobs that fill the database.
 
-Every collector here uses a **keyless** source by default:
+Every collector here reads from the whereq.cloud Data API with the operator's
+API key:
 
-* :mod:`.quotes` — Yahoo Finance (latest price for the whole universe)
-* :mod:`.history` — Yahoo Finance (daily OHLCV history)
-* :mod:`.altdata` — SEC EDGAR (filings + insider Form 4) and Yahoo (short interest)
-* :mod:`.universe` — the bundled symbol list
+* :mod:`.universe` — the instrument catalog
+* :mod:`.quotes` — the latest price for the whole universe
+* :mod:`.history` — daily OHLCV history
+* :mod:`.altdata` — short interest and insider Form 4 transactions
+* :mod:`.mapping` — pure payload → ORM value mappings shared by the above
 
 Collectors are idempotent: re-running them updates rows rather than
 duplicating them.

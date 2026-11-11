@@ -36,7 +36,7 @@ class MarketNewsItem(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False)
-    # 'newsapi' | 'polygon' | 'alpha_vantage' | 'eastmoney' | 'sina' | 'reddit' | 'sec_edgar'
+    # The upstream feed that produced this item
     source_id: Mapped[str | None] = mapped_column(String(255))
     title: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text)

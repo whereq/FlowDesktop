@@ -19,11 +19,8 @@ attribution or notice obligations that come with them.
 | [asyncpg](https://pypi.org/project/asyncpg/) | Apache-2.0 | |
 | [fastapi](https://pypi.org/project/fastapi/) | MIT | |
 | [pydantic](https://pypi.org/project/pydantic/) | MIT | |
-| [httpx](https://pypi.org/project/httpx/) | BSD-3-Clause | |
+| [httpx](https://pypi.org/project/httpx/) | BSD-3-Clause | The Data API client. |
 | [aiohttp](https://pypi.org/project/aiohttp/) | Apache-2.0 | |
-| [yfinance](https://pypi.org/project/yfinance/) | Apache-2.0 | |
-| [akshare](https://pypi.org/project/akshare/) | Apache-2.0 | |
-| [pandas](https://pypi.org/project/pandas/) | BSD-3-Clause | |
 | [numpy](https://pypi.org/project/numpy/) | BSD-3-Clause | |
 | [apscheduler](https://pypi.org/project/APScheduler/) | MIT | |
 | [python-jose](https://pypi.org/project/python-jose/) | MIT | |
@@ -61,19 +58,18 @@ sell the font on its own. The OFL reserves the "IBM Plex" name.
 
 ## Data sources
 
-FlowDesktop retrieves data from third-party services. Those services have their
-own terms, and **FlowDesktop does not grant you any rights to them**:
+FlowDesktop retrieves all market data from the **whereq.cloud Data API**, called
+with your own API key. That service has its own terms, and **FlowDesktop does
+not grant you any rights to it** — your key, your account, your obligations.
+See [docs/data-sources.md](docs/data-sources.md) for what it provides.
 
-- **Yahoo Finance** — accessed through the `yfinance` library, which reads the
-  public endpoints. It is an unofficial interface; use it at your own risk and
-  respect Yahoo's terms.
-- **SEC EDGAR** — public US government data. The SEC asks automated clients to
-  send a contact address in the `User-Agent` header; set `SEC_USER_AGENT` to
-  something like `Your Name you@example.com`.
-- **AKShare** — aggregates public data from a range of Chinese market sources.
+FlowDesktop bundles no scraper and no market-data snapshot. The SEC filing
+metadata the API returns is derived from public US government data (SEC EDGAR);
+the short-interest and insider data are aggregated by the API's own
+collectors.
 
 If you redistribute a database built by the collector, you are responsible for
-complying with the terms of whichever source the data came from.
+complying with the terms of the source the data came from.
 
 ## No warranty
 

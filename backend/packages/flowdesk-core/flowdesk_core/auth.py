@@ -28,6 +28,37 @@ from flowdesk_core.config import get_settings
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Configuration check
+# ---------------------------------------------------------------------------
+
+#: The placeholder host from the shipped config. A deployment that still has
+#: it has not been configured — it must not look like a real identity provider.
+_PLACEHOLDER_URLS = {"", "https://auth.example.com", "http://auth.example.com"}
+
+_NOT_CONFIGURED_DETAIL = (
+    "Authentication is not configured. Set KEYCLOAK_URL, KEYCLOAK_REALM and "
+    "KEYCLOAK_CLIENT_ID to your OpenID Connect provider before starting "
+    "FlowDesktop. See docs/setup.md."
+)
+
+
+def auth_configured() -> bool:
+    """True when the identity provider settings are usable.
+
+    False means the deployment still carries the shipped placeholders, so no
+    token can be verified and every authenticated route would fail with an
+    opaque error.
+    """
+    settings = get_settings()
+    url = (settings.keycloak_url or "").strip().rstrip("/")
+    if url.lower() in _PLACEHOLDER_URLS:
+        return False
+    if not (settings.keycloak_realm or "").strip():
+        return False
+    return bool((settings.keycloak_client_id or "").strip())
+
+
+# ---------------------------------------------------------------------------
 # JWKS cache — refreshed at most once per hour
 # ---------------------------------------------------------------------------
 _jwks_cache: dict | None = None
@@ -44,6 +75,14 @@ async def _get_jwks() -> dict:
         return _jwks_cache
 
     settings = get_settings()
+
+    if not auth_configured():
+        logger.error("%s", _NOT_CONFIGURED_DETAIL)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_NOT_CONFIGURED_DETAIL,
+        )
+
     url = f"{settings.keycloak_url}/realms/{settings.keycloak_realm}/protocol/openid-connect/certs"
 
     try:

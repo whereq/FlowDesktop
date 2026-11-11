@@ -1,7 +1,12 @@
 """Chinese stock name reference model.
 
 Source of truth for mapping Chinese stock codes to Chinese-language names.
-Populated and iteratively updated by AKShare and TuShare providers.
+
+The instrument catalog from the whereq.cloud Data API carries `name_cn`, and
+the universe sync writes it onto `stocks.name_cn`. This table is the deeper
+per-code reference: it is **not populated by the sync** — populate it yourself
+if you need the code-level mapping, the bare 6-digit exchange code, or the
+`last_updated_by` lineage column.
 """
 
 from datetime import datetime
@@ -15,13 +20,9 @@ from flowdesk_core.database import Base
 class ChineseStockName(Base):
     """Authoritative Chinese stock name reference table.
 
-    Each row maps a Yahoo Finance symbol (e.g. 600519.SS) to its
-    Chinese name (e.g. 贵州茅台).  The table is populated at startup
-    and refreshed daily by the sync_chinese_stock_names scheduler job.
-
-    AKShare is the primary source; TuShare fills gaps where AKShare
-    has no entry.  ``last_updated_by`` records which provider wrote
-    the most recent value so data lineage is traceable.
+    Each row maps a symbol (e.g. 600519.SS) to its Chinese name (e.g. 贵州茅台).
+    ``last_updated_by`` records which source wrote the most recent value so
+    data lineage is traceable.
     """
 
     __tablename__ = "chinese_stock_names"
@@ -33,10 +34,10 @@ class ChineseStockName(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
-    # Full Yahoo Finance symbol — foreign-key-equivalent to stocks.symbol
+    # Full symbol — foreign-key-equivalent to stocks.symbol
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
 
-    # Bare 6-digit exchange code used by AKShare / TuShare (no suffix)
+    # Bare 6-digit exchange code (no suffix)
     code: Mapped[str] = mapped_column(String(10), nullable=False)
 
     # Chinese name: e.g. 贵州茅台, 五粮液
@@ -45,7 +46,7 @@ class ChineseStockName(Base):
     # SSE (Shanghai) or SZSE (Shenzhen)
     exchange: Mapped[str] = mapped_column(String(10), nullable=False)
 
-    # 'akshare' or 'tushare' — which provider wrote this row last
+    # Which source wrote this row last
     last_updated_by: Mapped[str | None] = mapped_column(String(50))
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

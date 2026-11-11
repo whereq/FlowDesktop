@@ -1,8 +1,9 @@
 """ShortInterest — one short-interest snapshot for a symbol (per settlement date).
 
-Populated by the collect_short_interest job (Yahoo/yfinance); queried by
-`GET /v1/alt/short-interest/*` and the get_short_interest tool. One row per
-(symbol, settlement_date). See docs/design/RFC_NOVA_ALTDATA_POSITIONING.md.
+Synced from the whereq.cloud Data API (``/v1/alt/short-interest/{symbol}``);
+queried by `GET /v1/alt/short-interest/*` and the get_short_interest tool. One
+row per (symbol, settlement_date). See
+docs/design/RFC_NOVA_ALTDATA_POSITIONING.md.
 
 **Schema note.** This model used to declare the migration-034 column set
 (`as_of_date`, `shares_short`, `short_ratio`, `short_pct_float`,
@@ -10,8 +11,9 @@ Populated by the collect_short_interest job (Yahoo/yfinance); queried by
 again with the FINRA-shaped column set that the API and the live database
 actually use, so every ORM write raised UndefinedColumn and the table stayed
 empty. The model below matches the live table; migration 212 adds the
-unique constraint the upsert needs and the one Yahoo field that had nowhere
-to go (`short_pct_of_outstanding`).
+unique constraint the upsert needs and the one extra field that had nowhere
+to go (`short_pct_of_outstanding`). The Data API uses the same names, so the
+sync is a straight coercion.
 """
 
 from __future__ import annotations

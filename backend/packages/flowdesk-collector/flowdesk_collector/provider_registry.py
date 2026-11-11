@@ -1,13 +1,13 @@
-"""Provider registry — which data sources this deployment can talk to.
+"""Source registry — where this deployment's data comes from.
 
-FlowDesktop ships with providers that need **no API key**: Yahoo Finance
-(quotes + history), Stooq (historical backup), AKShare (China A-shares) and
-SEC EDGAR (filings, insider Form 4). Optional key-based providers can be
-enabled by setting the matching environment variable; see ``README.md``.
+FlowDesktop has exactly **one** data source: the whereq.cloud Data API, called
+with the operator's API key. There is no bundled scraper and no provider
+fallback chain, so the registry holds one entry and reports whether the key
+is configured.
 
 This module is the public surface for the ``/providers/status`` endpoint. It
-reads the ``provider_status`` table, which the collector seeds and keeps
-updated, so the API never has to know provider internals.
+reads the ``provider_status`` table, which the collector seeds, so the API
+never has to know where the data came from.
 """
 
 from __future__ import annotations
@@ -16,42 +16,31 @@ import logging
 
 logger = logging.getLogger("flowdesk-collector.provider-registry")
 
-#: The providers bundled with FlowDesktop, in fallback order per exchange.
-#: ``requires_key`` documents which ones need a credential to be useful.
+#: The name the source is recorded under in ``provider_status``.
+SOURCE_NAME = "whereq_cloud"
+
+#: The bundled sources. ``requires_key`` documents which ones need a
+#: credential to be useful.
 BUNDLED_PROVIDERS: list[dict] = [
     {
-        "name": "yahoo",
-        "label": "Yahoo Finance",
-        "requires_key": False,
-        "markets": "US, CA, JP, SG, TW, KR",
-        "notes": "Unofficial API. Unlimited but rate-limited (~100 req/min).",
-    },
-    {
-        "name": "stooq",
-        "label": "Stooq",
-        "requires_key": False,
-        "markets": "US, EU",
-        "notes": "Historical only, no real-time.",
-    },
-    {
-        "name": "akshare",
-        "label": "AKShare",
-        "requires_key": False,
-        "markets": "CN (SSE, SZSE)",
-        "notes": "Primary source for mainland China listings.",
-    },
-    {
-        "name": "sec_edgar",
-        "label": "SEC EDGAR",
-        "requires_key": False,
-        "markets": "US",
-        "notes": "Filings (10-K/10-Q) and insider Form 4 transactions.",
+        "name": SOURCE_NAME,
+        "label": "whereq.cloud Data API",
+        "requires_key": True,
+        "markets": "US, CA, CN, HK, JP, SG, TW, KR, UK, AU, BR, DE, IN",
+        "notes": "Market data, history, short interest and insider activity.",
     },
 ]
 
 
+def api_key_configured() -> bool:
+    """True when a whereq.cloud API key is present in the settings."""
+    from flowdesk_core.config import get_settings
+
+    return bool((get_settings().whereq_api_key or "").strip())
+
+
 async def list_providers(session) -> list[dict]:
-    """Return the provider status rows recorded by the collector.
+    """Return the source status rows recorded by the collector.
 
     The shape matches ``api.schemas.quote.ProviderStatusResponse``. Falls back
     to the bundled static list when the ``provider_status`` table has not been
@@ -80,8 +69,8 @@ async def list_providers(session) -> list[dict]:
                 "daily_used": 0,
                 "minute_limit": None,
                 "minute_used": 0,
-                "is_available": True,
-                "can_make_request": True,
+                "is_available": api_key_configured(),
+                "can_make_request": api_key_configured(),
             }
             for priority, p in enumerate(BUNDLED_PROVIDERS, start=1)
         ]
@@ -102,7 +91,7 @@ async def list_providers(session) -> list[dict]:
 
 
 async def seed_provider_status(session) -> int:
-    """Insert the bundled providers into ``provider_status`` if they are missing.
+    """Insert the bundled sources into ``provider_status`` if they are missing.
 
     Idempotent — safe to call on every collector start.
     """
@@ -126,7 +115,7 @@ async def seed_provider_status(session) -> int:
                 daily_used=0,
                 minute_limit=None,
                 minute_used=0,
-                is_available=True,
+                is_available=api_key_configured(),
             )
         )
         added += 1

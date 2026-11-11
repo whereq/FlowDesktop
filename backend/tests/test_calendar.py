@@ -1,26 +1,10 @@
-"""Calendar provider parse helpers + tool registration."""
+"""Calendar — the NOVA tool surface.
 
-from datetime import date
-from decimal import Decimal
+The FMP earnings-calendar provider is gone: market events come from the local
+``market_events`` table. The tool that reads it stays.
+"""
 
 from api.services.tool_registry import ToolRegistry
-from flowdesk_collector.providers.fmp import _cal_date, _cal_dec
-
-
-def test_cal_date_parses_and_guards():
-    assert _cal_date("2026-06-17") == date(2026, 6, 17)
-    assert _cal_date("2026-06-17 12:00:00") == date(2026, 6, 17)
-    assert _cal_date("") is None
-    assert _cal_date(None) is None
-    assert _cal_date("not-a-date") is None
-
-
-def test_cal_dec_parses_and_guards():
-    assert _cal_dec("1.23") == Decimal("1.23")
-    assert _cal_dec(0) == Decimal("0")  # explicit zero is meaningful
-    assert _cal_dec("") is None
-    assert _cal_dec(None) is None
-    assert _cal_dec("oops") is None
 
 
 def test_calendar_tool_is_registered():

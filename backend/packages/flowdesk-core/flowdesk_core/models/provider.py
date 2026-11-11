@@ -9,7 +9,7 @@ from flowdesk_core.database import Base
 
 
 class ProviderStatus(Base):
-    """Track rate limits and availability of data providers."""
+    """Track rate limits and availability of the deployment's data source."""
 
     __tablename__ = "provider_status"
 

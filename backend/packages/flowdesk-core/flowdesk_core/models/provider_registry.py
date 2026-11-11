@@ -1,4 +1,4 @@
-"""Provider registry — static reference table for all data providers."""
+"""Provider registry — static reference table describing each data source."""
 
 from datetime import datetime
 
@@ -9,24 +9,12 @@ from flowdesk_core.database import Base
 
 
 class ProviderRegistry(Base):
-    """Static reference table describing each data provider's capabilities and quotas.
+    """Static reference table describing each data source's capabilities and quotas.
 
-    Seeded once at startup via ProviderOrchestrator.seed_provider_registry().
-    Join with crawler_run_log and provider_status to produce the daily stats report.
-
-    Example report query:
-        SELECT
-            r.run_id, r.job_name, r.provider_name,
-            reg.display_name, reg.free_daily_limit,
-            ps.daily_used, ps.daily_limit,
-            ROUND(ps.daily_used * 100.0 / NULLIF(ps.daily_limit, 0), 1) AS quota_pct,
-            r.symbols_attempted, r.symbols_succeeded, r.records_fetched,
-            r.duration_seconds, r.status
-        FROM crawler_run_log r
-        JOIN provider_registry reg ON reg.provider_name = r.provider_name
-        JOIN provider_status   ps  ON ps.provider_name  = r.provider_name
-        WHERE r.plan_date = CURRENT_DATE
-        ORDER BY r.started_at;
+    FlowDesktop has one data source — the whereq.cloud Data API — so this
+    table holds at most one row in practice. It is kept for the schema and for
+    anyone who wants to point FlowDesktop at an additional source; the live
+    availability of the source itself is tracked in ``provider_status``.
     """
 
     __tablename__ = "provider_registry"

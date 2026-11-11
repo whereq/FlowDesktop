@@ -12,13 +12,17 @@
 
 FlowDesktop is an AI analyst for your watchlist. Ask it about a ticker in plain
 English (or Chinese) and it answers from real market data: quotes, price
-history, SEC filings, insider Form 4 activity, short interest and congressional
-trades. It can also run on a schedule, watch for catalysts, and let you paper
-trade the whole thing.
+history, insider Form 4 activity, short interest and congressional trades. It
+can also run on a schedule, watch for catalysts, and let you paper trade the
+whole thing.
 
-The interesting part is that **it needs no API keys to work**. The bundled data
-providers — Yahoo Finance, SEC EDGAR, AKShare — are free and keyless, so you can
-clone it, point it at a database, and have live data in a couple of minutes.
+Market data comes from the **whereq.cloud Data API**. FlowDesktop is a client
+of it: every request carries your API key, and there is no bundled scraper and
+no anonymous fallback. Authentication is delegated to **your own OpenID
+Connect provider** — nothing about it is bundled either. So you can clone the
+repo and have it building in a couple of minutes, but to actually *run* it you
+need two secrets of your own: a whereq.cloud API key and your identity
+provider's settings.
 
 ## What you get
 
@@ -32,6 +36,18 @@ clone it, point it at a database, and have live data in a couple of minutes.
 | **Bilingual** | English and Simplified Chinese throughout, including the answers. |
 | **Bring your own key** | Point it at any LLM provider, or let each user bring their own. |
 
+## What you need to run it
+
+Two secrets, both yours:
+
+| Secret | Why | Where it goes |
+|---|---|---|
+| **whereq.cloud API key** | Every piece of market data. The key is sent in the `X-API-Key` header; without it the app refuses to fetch anything. | `WHEREQ_API_KEY` |
+| **Your OIDC provider** | Logins and roles. The shipped values are placeholders — point them at your own realm. | `KEYCLOAK_URL`, `KEYCLOAK_REALM`, `KEYCLOAK_CLIENT_ID` |
+
+A whereq.cloud key with the `filings` scope unlocks the SEC filing endpoints.
+Everything else works with a standard key.
+
 ## Quick start
 
 ### Docker Compose (recommended)
@@ -41,13 +57,14 @@ git clone https://github.com/whereq/FlowDesktop.git
 cd FlowDesktop
 
 cp docker/.env.example docker/.env
-# edit docker/.env — at minimum set POSTGRES_PASSWORD and your OIDC settings
+# edit docker/.env — set WHEREQ_API_KEY, POSTGRES_PASSWORD and your OIDC settings
 
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
 The API comes up on `:8000`, the web UI on `:8080`, and the database is
-initialised with the `vector` and `pg_trgm` extensions it needs.
+initialised with the `vector` and `pg_trgm` extensions it needs. The collector
+then syncs the instrument universe and starts filling the database.
 
 ### Local development
 
@@ -65,8 +82,8 @@ yarn install
 yarn dev
 ```
 
-See **[docs/setup.md](docs/setup.md)** for the full guide — identity provider
-setup, seeding the symbol universe, running the collector, BYOK mode and
+See **[docs/setup.md](docs/setup.md)** for the full guide — getting a
+Data API key, identity provider setup, running the collector, BYOK mode and
 troubleshooting.
 
 ## Architecture at a glance
@@ -84,26 +101,33 @@ troubleshooting.
         │                      │                      │
 ┌───────▼────────┐   ┌─────────▼─────────┐   ┌────────▼─────────┐
 │   collector    │   │    PostgreSQL 17  │   │   LLM gateway    │
-│ quotes/history │◀─▶│ 51 tables, pgvec │   │ platform or BYOK │
-│ SEC/insider/SI │   └───────────────────┘   └──────────────────┘
-└────────────────┘
+│ universe,      │◀─▶│ 51 tables, pgvec │   │ platform or BYOK │
+│ quotes, history│   └───────────────────┘   └──────────────────┘
+└───────┬────────┘
+        │  X-API-Key
+┌───────▼─────────────────────────┐
+│  whereq.cloud Data API         │
+│  quotes · history · catalog ·   │
+│  short interest · insider Form 4│
+└─────────────────────────────────┘
 ```
 
 Three processes, two of them optional to run separately:
 
 - **`api`** — the FastAPI application. Serves the REST API, the NOVA chat
   stream, and the tool registry.
-- **`collector`** — fills the database. Quotes and history from Yahoo Finance,
-  filings and insider activity from SEC EDGAR, short interest from Yahoo. Runs
-  on a schedule and only collects while markets are open.
+- **`collector`** — syncs the database from the whereq.cloud Data API using
+  your key: the instrument universe, quotes, daily history, short interest and
+  insider activity. It runs on a schedule and only pulls quotes while markets
+  are open.
 - **`frontend`** — the React app.
 
 The two Python packages live in this repository under `backend/packages/`:
 
 | Package | What it is |
 |---|---|
-| `flowdesk-core` | The data core: SQLAlchemy models, database engine, settings, auth, LLM gateway. |
-| `flowdesk-collector` | The data layer: providers, market hours, the scheduler and the collectors. |
+| `flowdesk-core` | The data core: SQLAlchemy models, database engine, settings, auth, LLM gateway, and the Data API client. |
+| `flowdesk-collector` | The sync layer: the scheduler, the collectors, and the payload-to-ORM mappings. |
 
 ## Repository layout
 
@@ -117,8 +141,8 @@ FlowDesktop/
 │   ├── tests/                  unit tests
 │   ├── alembic/                schema migrations
 │   └── packages/
-│       ├── flowdesk-core/      models, database, settings, auth
-│       └── flowdesk-collector/ providers, scheduler, collectors
+│       ├── flowdesk-core/      models, database, settings, auth, Data API client
+│       └── flowdesk-collector/ scheduler, collectors, payload mappings
 ├── frontend/                   React 19 + Vite + TypeScript
 ├── docker/                     Dockerfiles and Compose stack
 └── docs/                       architecture and design documentation
@@ -128,26 +152,29 @@ FlowDesktop/
 
 | Document | What it covers |
 |---|---|
+| [docs/setup.md](docs/setup.md) | Getting it running. |
 | [docs/architecture.md](docs/architecture.md) | The system, end to end, with diagrams. |
 | [docs/design-high-level-design.md](docs/design-high-level-design.md) | Components, boundaries, subsystems, extension points. |
 | [docs/design-low-level-design.md](docs/design-low-level-design.md) | Module-by-module implementation detail. |
-| [docs/setup.md](docs/setup.md) | Getting it running. |
 | [docs/database.md](docs/database.md) | The schema, table by table. |
+| [docs/data-sources.md](docs/data-sources.md) | What the Data API provides, and the two gaps it leaves. |
 
 ## Data sources
 
-Everything bundled works without an API key:
+Everything comes from one place — the whereq.cloud Data API — with your key:
 
-| Source | Used for | Key required |
-|---|---|---|
-| Yahoo Finance | Quotes, daily history, short interest | No |
-| SEC EDGAR | 10-K / 10-Q filings, insider Form 4 | No |
-| AKShare | Mainland China listings (SSE, SZSE) | No |
-| Stooq | Historical prices (backup) | No |
+| Endpoint family | Used for |
+|---|---|
+| `/v1/catalog/*` | The instrument universe, exchange coverage, per-symbol profiles |
+| `/v1/equities/*` | Quotes and daily OHLCV history |
+| `/v1/alt/short-interest/*` | Short-interest snapshots |
+| `/v1/alt/insider/*` | Insider Form 4 transactions |
+| `/v1/edgar/filings` | SEC filing metadata (needs the `filings` scope) |
 
-Optional key-based providers (Alpha Vantage, Finnhub, Polygon, Tiingo, FMP,
-FRED, TuShare) are supported as extension points — see
-[docs/design-high-level-design.md](docs/design-high-level-design.md).
+Two surfaces are **not** covered by the API and therefore stay empty until you
+populate them yourself — SEC filing *narrative* (the grounding index) and
+congressional trades. The tables, tools and UI panels are all still there.
+See [docs/data-sources.md](docs/data-sources.md) for the details.
 
 ## Development
 
