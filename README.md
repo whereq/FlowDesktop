@@ -183,6 +183,7 @@ See [docs/data-sources.md](docs/data-sources.md) for the details.
 cd backend
 uv run python -m pytest -q --no-cov     # unit tests
 uv run python evals/run_evals.py        # deterministic router evals
+uv run python scripts/check_schema.py   # migrations vs models
 uv run ruff check . && uv run ruff format --check .
 
 # Frontend
@@ -190,7 +191,14 @@ cd frontend
 yarn lint && yarn build
 ```
 
-Both suites run in CI on every push and pull request.
+Four gates run in CI on every push and pull request:
+
+| Gate | What it proves |
+|---|---|
+| **Backend** | The unit tests, the deterministic router evals and the linter. |
+| **Schema** | The migrations produce exactly the schema the models declare — table names, column names, types and nullability. No database needed. |
+| **Docker** | Both production images build, and the Compose stack is valid. |
+| **Frontend** | The linter and the production bundle. |
 
 ## Contributing
 

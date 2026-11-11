@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [1.0.2] — 2026-11-11
+
+Fixes the production image build, and adds the gates that would have caught it.
+
+### Fixed
+
+- **The API image built without the embedding model and failed.** The
+  Dockerfile baked the local ONNX embedding model into the image, but
+  `fastembed` is an optional extra that the locked runtime install does not
+  include — so `docker build` died with `ModuleNotFoundError: No module named
+  'fastembed'`. The backend project now declares an `embeddings` extra and
+  the image installs it explicitly.
+- The runtime image now also installs `libgomp1`, which `onnxruntime` needs.
+- Baking the model into the image no longer fails the build when the model
+  hub is unreachable. The embedding model is loaded lazily, so a build behind
+  a firewall still produces a working image; semantic search downloads the
+  model on first use instead.
+
+### Added
+
+- `backend/scripts/check_schema.py` — a static schema check that compares the
+  migrations against the models (table names, column names, types and
+  nullability) without needing a database or the pgvector extension.
+- Two new CI gates: **Schema** runs that check, and **Docker** builds both
+  production images and validates the Compose stack. The image build is its
+  own gate because a dependency that is only an optional extra breaks the
+  build in a way no unit test would catch.
+
 ## [1.0.1] — 2026-11-11
 
 FlowDesktop becomes a client of the whereq.cloud Data API.
@@ -89,6 +117,7 @@ The first public release.
 - **Docker Compose** stack for the API, the collector, the frontend and
   PostgreSQL.
 
-[Unreleased]: https://github.com/whereq/FlowDesktop/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/whereq/FlowDesktop/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/whereq/FlowDesktop/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/whereq/FlowDesktop/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/whereq/FlowDesktop/releases/tag/v1.0.0

@@ -39,6 +39,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The local ONNX embedding model used by NOVA's semantic retrieval. It is an
+# extra because it is a large dependency (onnxruntime) and the feature is
+# optional — the Docker image opts in explicitly so the model can be baked in
+# and semantic search works with no runtime download.
+embeddings = ["flowdesk-core[embeddings]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",

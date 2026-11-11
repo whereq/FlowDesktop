@@ -40,9 +40,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 #
 # The two local packages are path dependencies, so they are installed from
 # ./packages — there is nothing to fetch over the network.
+#
+# `--extra embeddings` pulls in the local ONNX embedding model, so the model
+# can be baked into the image below and semantic search needs no runtime
+# download.
 RUN cd backend \
     && uv venv /opt/venv \
-    && uv export --locked --no-dev --no-emit-project --no-hashes --no-editable \
+    && uv export --locked --extra embeddings --no-dev --no-emit-project --no-hashes --no-editable \
          --format requirements.txt -o /tmp/requirements.txt \
     && uv pip install --no-cache -r /tmp/requirements.txt
 
@@ -60,6 +64,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
+    libgomp1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,8 +74,15 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Bake the local embedding model into the image so semantic search works
 # offline and no model is downloaded on first request. Placed BEFORE the
 # application-code COPY so ordinary code changes reuse this cached layer.
+#
+# A download failure must NOT fail the build: the model comes from a public
+# model hub, and a user behind a firewall or a mirror should still get a
+# working image. The embedding model is loaded lazily, so without it only the
+# optional semantic-search feature is affected — it will fetch the model on
+# first use instead.
 ENV FASTEMBED_CACHE_PATH=/app/.fastembed
-RUN python -c "import os; from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', cache_dir=os.environ['FASTEMBED_CACHE_PATH'])"
+RUN python -c "import os; from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', cache_dir=os.environ['FASTEMBED_CACHE_PATH'])" \
+    || echo "[build] WARNING: could not pre-download the embedding model. The image still builds; semantic search will download it on first use."
 
 # ── Application layer ──────────────────────────────────────────────────────
 COPY backend/api ./api
